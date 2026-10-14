@@ -11,7 +11,6 @@
   var STORE_KEY = 'northlight.bookings.v1';
   var WAIT_KEY = 'northlight.waitlist.v1';
   var PREF_KEY = 'northlight.prefs.v1';
-  var SCHED_KEY = 'northlight.schedule.v1';
   var CHANNEL = 'northlight.realtime.v1';
 
   var MIN_NOTICE_MINUTES = 120;   // earliest bookable start from now
@@ -19,9 +18,6 @@
   var REF_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
   /* Money: ONE place to change currency for the entire app. */
-  /* Where customers send GCash payments. CHANGE THIS to the salon's real number before going live. */
-  var GCASH = { number: '0917 000 0000', name: 'Northlight Studio' };
-
   var CURRENCY = { code: 'PHP', symbol: '\u20B1', locale: 'en-PH', name: 'Philippine peso' };
 
   var WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -229,53 +225,16 @@
 
   /* ---------------- catalogue lookups ---------------- */
 
-  var bundleCache = {};
-  function baseService(id) {
+  function serviceById(id) {
     for (var i = 0; i < SERVICES.length; i++) if (SERVICES[i].id === id) return SERVICES[i];
     return null;
-  }
-  /* A service id may be a bundle such as "haircut+manipedi": one appointment, services back to back. */
-  function serviceParts(id) {
-    return String(id || '').split('+').filter(Boolean);
-  }
-  function bundleId(ids) {
-    var seen = {}, out = [];
-    SERVICES.forEach(function (s) { if (ids.indexOf(s.id) >= 0 && !seen[s.id]) { seen[s.id] = 1; out.push(s.id); } });
-    return out.join('+');
-  }
-  function serviceById(id) {
-    if (!id) return null;
-    var one = baseService(id);
-    if (one) return one;
-    if (String(id).indexOf('+') < 0) return null;
-    if (bundleCache[id]) return bundleCache[id];
-    var parts = serviceParts(id).map(baseService);
-    if (parts.length < 2 || parts.some(function (x) { return !x; })) return null;
-    var b = {
-      id: bundleId(parts.map(function (x) { return x.id; })),
-      name: parts.map(function (x) { return x.name; }).join(' + '),
-      emoji: parts.map(function (x) { return x.emoji; }).join(''),
-      minutes: parts.reduce(function (a, x) { return a + x.minutes; }, 0),
-      buffer: Math.max.apply(null, parts.map(function (x) { return x.buffer || 0; })),
-      price: parts.reduce(function (a, x) { return a + x.price; }, 0),
-      step: Math.min.apply(null, parts.map(function (x) { return x.step || 15; })),
-      color: parts[0].color,
-      blurb: 'Back-to-back in one visit: ' + parts.map(function (x) { return x.name; }).join(', ') + '.',
-      parts: parts.map(function (x) { return x.id; })
-    };
-    bundleCache[id] = b; bundleCache[b.id] = b;
-    return b;
-  }
-  function canDeliver(provider, serviceId) {
-    var parts = serviceParts(serviceId);
-    return !!provider && parts.length > 0 && parts.every(function (p) { return provider.services.indexOf(p) >= 0; });
   }
   function providerById(id) {
     for (var i = 0; i < PROVIDERS.length; i++) if (PROVIDERS[i].id === id) return PROVIDERS[i];
     return null;
   }
   function providersFor(serviceId) {
-    return PROVIDERS.filter(function (p) { return canDeliver(p, serviceId); });
+    return PROVIDERS.filter(function (p) { return p.services.indexOf(serviceId) >= 0; });
   }
   function isClosure(dateS) {
     return CLOSURES.some(function (c) { return c && c.date === dateS; });
@@ -294,6 +253,7 @@
   var list = [];
   var waitlist = [];
   var channel = null;
+  var busy = [];   // other customers' time blocks from the shared database (no personal data)
 
   function readList() {
     var arr = readJSON(STORE_KEY, []);
@@ -316,13 +276,24 @@
   /* ---------------- availability engine ---------------- */
 
   function occupiedIntervals(dateS, providerId, excludeId) {
-    return list.filter(function (b) {
+    var out = list.filter(function (b) {
       return b.providerId === providerId && b.date === dateS && b.status !== 'cancelled' && b.id !== excludeId;
     }).map(function (b) {
       var s = serviceById(b.serviceId) || { buffer: 0 };
       var mins = b.minutes || (s.minutes || 30);
       return { start: b.startMin, end: b.startMin + mins + (s.buffer || 0) };
     });
+    if (busy.length) {
+      var known = {};
+      list.forEach(function (b) { known[b.id] = true; });
+      busy.forEach(function (x) {
+        // a booking we hold locally is judged by its local state; the stub only covers other people's
+        if (known[x.id] || x.id === excludeId || x.providerId !== providerId || x.date !== dateS) return;
+        var s = serviceById(x.serviceId) || { buffer: 0 };
+        out.push({ start: x.startMin, end: x.startMin + x.minutes + (s.buffer || 0) });
+      });
+    }
+    return out;
   }
 
   /**
@@ -335,7 +306,7 @@
     opts = opts || {};
     var provider = providerById(providerId), service = serviceById(serviceId);
     if (!provider || !service) return { slots: [], total: 0, free: 0, block: null, state: 'incomplete' };
-    if (!canDeliver(provider, serviceId)) return { slots: [], total: 0, free: 0, block: null, state: 'not-offered' };
+    if (provider.services.indexOf(serviceId) < 0) return { slots: [], total: 0, free: 0, block: null, state: 'not-offered' };
 
     var block = workingBlock(provider, dateS);
     var today = todayStr(CLINIC_TZ);
@@ -357,7 +328,7 @@
       for (var i = 0; i < occ.length; i++) {
         if (t < occ[i].end && end > occ[i].start) { clash = true; break; }
       }
-      var tooSoon = opts.walkIn ? instantOf(dateS, t).getTime() < Date.now() - 30 * 60000 : instantOf(dateS, t).getTime() < earliest;
+      var tooSoon = instantOf(dateS, t).getTime() < earliest;
       var free = !clash && !isPast && !beyondWindow && !tooSoon;
       // `end` is the OCCUPIED end (service + turnaround buffer) — that is the span
       // the conflict test uses. `finish` is when the customer is actually done.
@@ -368,8 +339,8 @@
   }
   function slotPush(arr, o) { arr.push(o); }
 
-  function isSlotFree(providerId, serviceId, dateS, startMin, excludeId, walkIn) {
-    var r = slotsFor(providerId, serviceId, dateS, { excludeId: excludeId, walkIn: walkIn });
+  function isSlotFree(providerId, serviceId, dateS, startMin, excludeId) {
+    var r = slotsFor(providerId, serviceId, dateS, { excludeId: excludeId });
     for (var i = 0; i < r.slots.length; i++) {
       if (r.slots[i].start === startMin) return r.slots[i].free;
     }
@@ -400,70 +371,16 @@
   }
   function nowIso() { return new Date().toISOString(); }
 
+  function localByRef(ref) {
+    var q = String(ref || '').trim().toUpperCase();
+    for (var i = 0; i < list.length; i++) if (String(list[i].ref).toUpperCase() === q) return list[i];
+    return null;
+  }
+
   function sorted() {
     return list.slice().sort(function (a, b) {
       return (a.date + ':' + pad(a.startMin)).localeCompare(b.date + ':' + pad(b.startMin));
     });
-  }
-
-  /* ---------------- payment ---------------- */
-  function paymentFor(price, p) {
-    if (!price) return { method: 'free', status: 'free', amount: 0 };
-    if (p.payMethod === 'gcash' && !p.walkIn) {
-      return { method: 'gcash', status: 'awaiting', amount: price, ref: String(p.payRef || '').trim() };
-    }
-    return { method: p.walkIn ? (p.payMethod || 'cash') : 'salon', status: p.walkIn && p.paid ? 'paid' : 'unpaid', amount: price };
-  }
-
-  /* ---------------- waitlist helpers ---------------- */
-  function fulfilWaitlist(b) {
-    var email = b.customer && b.customer.email, changed = false;
-    if (!email) return;
-    waitlist.forEach(function (w) {
-      if ((w.status === 'waiting' || w.status === 'notified') && w.email === email && w.date === b.date) {
-        w.status = 'fulfilled'; changed = true;
-      }
-    });
-    if (changed) writeJSON(WAIT_KEY, waitlist);
-  }
-
-  /* After a slot is released, tell anyone waiting for that day. */
-  function notifyWaitlist() {
-    var changed = false;
-    waitlist.forEach(function (w) {
-      if (w.status !== 'waiting') return;
-      var pool = w.providerId ? [providerById(w.providerId)] : providersFor(w.serviceId);
-      var open = pool.some(function (pr) {
-        return pr && slotsFor(pr.id, w.serviceId, w.date).free > 0;
-      });
-      if (open) { w.status = 'notified'; w.notifiedAt = nowIso(); changed = true; }
-    });
-    if (changed) writeJSON(WAIT_KEY, waitlist);
-  }
-
-  /* ---------------- staff schedule overrides ---------------- */
-  var closureDates = [];
-  function applySchedule() {
-    var saved = readJSON(SCHED_KEY, null);
-    if (!saved) return;
-    PROVIDERS.forEach(function (pr) {
-      var o = saved.providers && saved.providers[pr.id];
-      if (!o) return;
-      var hours = {};
-      Object.keys(o.hours || {}).forEach(function (k) {
-        var h = o.hours[k];
-        if (h && h.length === 2 && h[0] < h[1]) hours[k] = [h[0], h[1]];
-      });
-      pr.hours = hours;
-      pr.off = Array.isArray(o.off) ? o.off.slice() : [];
-    });
-    CLOSURES.length = 0;
-    (saved.closures || []).forEach(function (c) { if (c && c.date) CLOSURES.push({ date: c.date, reason: c.reason || '' }); });
-  }
-  function saveSchedule() {
-    var out = { providers: {}, closures: CLOSURES.filter(function (c) { return c && c.date; }) };
-    PROVIDERS.forEach(function (pr) { out.providers[pr.id] = { hours: pr.hours, off: pr.off || [] }; });
-    writeJSON(SCHED_KEY, out);
   }
 
   var Store = {
@@ -477,8 +394,11 @@
     Events: Events,
     U: U,
 
+    /* set by js/cloud.js when the shared database (Supabase, via /api/bookings) is reachable */
+    sync: null,
+    isCloud: function () { return !!(Store.sync && Store.sync.enabled); },
+
     init: function () {
-      applySchedule();
       list = readList();
       waitlist = readJSON(WAIT_KEY, []);
       return Store;
@@ -506,9 +426,6 @@
     },
 
     serviceById: serviceById,
-    serviceParts: serviceParts,
-    bundleId: bundleId,
-    canDeliver: canDeliver,
     providerById: providerById,
     providersFor: providersFor,
     workingBlock: workingBlock,
@@ -523,13 +440,20 @@
       return null;
     },
     byRef: function (ref) {
-      var q = String(ref || '').trim().toUpperCase();
-      for (var i = 0; i < list.length; i++) if (String(list[i].ref).toUpperCase() === q) return list[i];
-      return null;
+      var b = localByRef(ref);
+      if (!b && Store.isCloud()) Store.sync.lookup(String(ref || '').trim());
+      return b;
+    },
+    /* promise version for callers that must wait for the shared database (deep links) */
+    findRef: function (ref) {
+      var b = localByRef(ref);
+      if (b || !Store.sync) return Promise.resolve(b);
+      return Store.sync.lookupRef(String(ref || '').trim()).then(function () { return localByRef(ref); });
     },
     mine: function (query) {
       var q = String(query || '').trim().toLowerCase();
       if (!q) return [];
+      if (Store.isCloud()) Store.sync.lookup(q);   // refresh in the background; 'change' fires when it lands
       return sorted().filter(function (b) {
         return (b.customer.email && b.customer.email.toLowerCase() === q) ||
                String(b.ref).toLowerCase() === q;
@@ -548,16 +472,66 @@
       return sorted().filter(function (b) { return instantOf(b.date, b.startMin).getTime() <= now; });
     },
 
+    /* --- shared database --- */
+
+    /* o.bookings: upsert (or replace the whole list with o.replace); o.drop: refs the server
+       does not know; o.only: keep just these refs (used when staff sign out); o.busy / o.waitlist. */
+    applyRemote: function (o) {
+      o = o || {};
+      var before = JSON.stringify([list, busy, waitlist]);
+      if (o.busy) busy = o.busy;
+      if (o.waitlist) { waitlist = o.waitlist; writeJSON(WAIT_KEY, waitlist); }
+      if (o.bookings) {
+        var incoming = o.bookings.filter(function (b) { return b && serviceById(b.serviceId) && providerById(b.providerId) && b.customer; });
+        if (o.replace) list = incoming;
+        else {
+          var byId = {};
+          incoming.forEach(function (b) { byId[b.id] = b; });
+          list = list.map(function (b) { return byId[b.id] || b; });
+          var have = {};
+          list.forEach(function (b) { have[b.id] = true; });
+          incoming.forEach(function (b) { if (!have[b.id]) list.push(b); });
+        }
+      }
+      if (o.drop && o.drop.length) {
+        var gone = {};
+        o.drop.forEach(function (r) { gone[String(r).toUpperCase()] = true; });
+        list = list.filter(function (b) { return !gone[String(b.ref).toUpperCase()]; });
+      }
+      if (o.only) {
+        var keep = {};
+        o.only.forEach(function (r) { keep[String(r).toUpperCase()] = true; });
+        list = list.filter(function (b) { return keep[String(b.ref).toUpperCase()]; });
+      }
+      if (JSON.stringify([list, busy, waitlist]) === before) return false;
+      persist();
+      Events.emit('change', { remote: true });
+      broadcast();
+      return true;
+    },
+
+    /* books through the shared database when it is on (slot is re-checked server-side), else locally */
+    bookAsync: function (p) {
+      if (!Store.isCloud()) return Promise.resolve(Store.book(p));
+      var service = serviceById(p.serviceId), provider = providerById(p.providerId);
+      if (!service || !provider) return Promise.resolve({ ok: false, error: 'invalid-selection' });
+      if (provider.services.indexOf(service.id) < 0) return Promise.resolve({ ok: false, error: 'provider-skill' });
+      return Store.sync.create(p).then(function (res) {
+        if (res && res.ok && res.booking) Store.applyRemote({ bookings: [res.booking] });
+        return res;
+      });
+    },
+
     /* --- mutations --- */
 
     book: function (p) {
       var service = serviceById(p.serviceId), provider = providerById(p.providerId);
       if (!service || !provider) return { ok: false, error: 'invalid-selection' };
-      if (!canDeliver(provider, service.id)) return { ok: false, error: 'provider-skill' };
-      if (!Store.isSlotFree(provider.id, service.id, p.date, p.startMin, null, !!p.walkIn)) return { ok: false, error: 'slot-unavailable' };
+      if (provider.services.indexOf(service.id) < 0) return { ok: false, error: 'provider-skill' };
+      if (!Store.isSlotFree(provider.id, service.id, p.date, p.startMin)) return { ok: false, error: 'slot-unavailable' };
 
       var clash = false, ref;
-      do { ref = makeRef(); } while (Store.byRef(ref));
+      do { ref = makeRef(); } while (localByRef(ref));
 
       var booking = {
         id: uid('bk'),
@@ -568,24 +542,21 @@
         startMin: p.startMin,
         minutes: service.minutes,
         price: service.price,
-        payment: paymentFor(service.price, p),
-        source: p.walkIn ? 'walk-in' : 'online',
         customer: {
-          name: String(p.name || '').trim() || (p.walkIn ? 'Walk-in guest' : ''),
+          name: String(p.name || '').trim(),
           email: String(p.email || '').trim().toLowerCase(),
           phone: String(p.phone || '').trim(),
           notes: String(p.notes || '').trim()
         },
         reminder: p.reminder || 'none',
-        status: (p.payMethod === 'gcash' && service.price > 0 && !p.walkIn) ? 'pending' : 'confirmed',
+        status: 'confirmed',
         tzAtBooking: p.tz || CLINIC_TZ,
         createdAt: nowIso(),
         updatedAt: nowIso(),
         revisions: 0,
-        history: [{ at: nowIso(), action: 'created', detail: (p.walkIn ? 'Walk-in: ' : 'Booked ') + service.name + ' with ' + provider.name }]
+        history: [{ at: nowIso(), action: 'created', detail: 'Booked ' + service.name + ' with ' + provider.name }]
       };
       list.push(booking);
-      fulfilWaitlist(booking);
       announce();
       return { ok: true, booking: booking, clash: clash };
     },
@@ -605,115 +576,11 @@
       b.status = status;
       b.updatedAt = nowIso();
       if (status === 'cancelled') b.cancelledAt = nowIso();
-      if (status === 'completed' && b.payment && b.payment.status === 'unpaid') { b.payment.status = 'paid'; b.payment.paidAt = nowIso(); }
       b.history = b.history || [];
       b.history.push({ at: nowIso(), action: status, detail: detail || ('Marked ' + status) });
-      if (status === 'cancelled') notifyWaitlist();
       announce();
+      if (Store.isCloud()) Store.sync.push('status', b, { status: status, detail: detail || ('Marked ' + status) });
       return { ok: true, booking: b };
-    },
-
-    /* Staff confirms that a GCash deposit/payment arrived (pending -> confirmed). */
-    confirmPayment: function (id) {
-      var b = Store.byId(id);
-      if (!b) return { ok: false, error: 'not-found' };
-      b.payment = b.payment || { method: 'gcash', amount: b.price };
-      b.payment.status = 'paid'; b.payment.paidAt = nowIso();
-      if (b.status === 'pending') b.status = 'confirmed';
-      b.updatedAt = nowIso();
-      b.history = b.history || [];
-      b.history.push({ at: nowIso(), action: 'paid', detail: 'Payment received (' + (b.payment.method || 'cash') + ') — booking confirmed' });
-      announce();
-      return { ok: true, booking: b };
-    },
-
-    markPaid: function (id, method) {
-      var b = Store.byId(id);
-      if (!b) return { ok: false, error: 'not-found' };
-      b.payment = b.payment || { amount: b.price };
-      b.payment.status = 'paid'; b.payment.paidAt = nowIso();
-      if (method) b.payment.method = method;
-      b.updatedAt = nowIso();
-      b.history = b.history || [];
-      b.history.push({ at: nowIso(), action: 'paid', detail: 'Marked paid (' + (b.payment.method || 'cash') + ')' });
-      announce();
-      return { ok: true, booking: b };
-    },
-
-    /* --- reviews --- */
-    addReview: function (id, stars, text) {
-      var b = Store.byId(id);
-      if (!b) return { ok: false, error: 'not-found' };
-      var done = b.status === 'completed' || (b.status === 'confirmed' && instantOf(b.date, b.startMin).getTime() < Date.now());
-      if (!done) return { ok: false, error: 'not-finished' };
-      if (b.review) return { ok: false, error: 'already-reviewed' };
-      stars = Math.round(Number(stars));
-      if (!(stars >= 1 && stars <= 5)) return { ok: false, error: 'bad-rating' };
-      b.review = { stars: stars, text: String(text || '').trim().slice(0, 400), at: nowIso() };
-      b.updatedAt = nowIso();
-      b.history = b.history || [];
-      b.history.push({ at: nowIso(), action: 'reviewed', detail: 'Left a ' + stars + '-star review' });
-      announce();
-      return { ok: true, booking: b };
-    },
-    ratingFor: function (providerId) {
-      var n = 0, sum = 0;
-      list.forEach(function (b) {
-        if (b.review && (!providerId || b.providerId === providerId)) { n++; sum += b.review.stars; }
-      });
-      return { count: n, avg: n ? Math.round((sum / n) * 10) / 10 : 0 };
-    },
-
-    /* --- staff schedule --- */
-    getSchedule: function () {
-      return {
-        providers: PROVIDERS.map(function (pr) { return { id: pr.id, name: pr.name, role: pr.role, hours: JSON.parse(JSON.stringify(pr.hours)), off: (pr.off || []).slice() }; }),
-        closures: CLOSURES.filter(function (c) { return c && c.date; }).map(function (c) { return { date: c.date, reason: c.reason }; })
-      };
-    },
-    setHours: function (providerId, hours) {
-      var pr = providerById(providerId);
-      if (!pr) return { ok: false, error: 'not-found' };
-      var clean = {};
-      for (var d = 0; d < 7; d++) {
-        var h = hours && hours[d];
-        if (!h) continue;
-        if (!(h[0] >= 0 && h[1] <= 1440 && h[0] < h[1])) return { ok: false, error: 'bad-hours', day: d };
-        clean[d] = [h[0], h[1]];
-      }
-      pr.hours = clean; saveSchedule(); announce();
-      return { ok: true };
-    },
-    addDayOff: function (providerId, dateS) {
-      var pr = providerById(providerId);
-      if (!pr || !/^\d{4}-\d{2}-\d{2}$/.test(dateS)) return { ok: false, error: 'bad-input' };
-      pr.off = pr.off || [];
-      if (pr.off.indexOf(dateS) < 0) pr.off.push(dateS);
-      pr.off.sort(); saveSchedule(); announce();
-      return { ok: true };
-    },
-    removeDayOff: function (providerId, dateS) {
-      var pr = providerById(providerId);
-      if (!pr) return { ok: false, error: 'not-found' };
-      pr.off = (pr.off || []).filter(function (x) { return x !== dateS; });
-      saveSchedule(); announce();
-      notifyWaitlist();
-      return { ok: true };
-    },
-    addClosure: function (dateS, reason) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateS)) return { ok: false, error: 'bad-input' };
-      if (!CLOSURES.some(function (c) { return c && c.date === dateS; })) CLOSURES.push({ date: dateS, reason: reason || '' });
-      saveSchedule(); announce();
-      return { ok: true };
-    },
-    removeClosure: function (dateS) {
-      for (var i = CLOSURES.length - 1; i >= 0; i--) if (CLOSURES[i] && CLOSURES[i].date === dateS) CLOSURES.splice(i, 1);
-      saveSchedule(); announce(); notifyWaitlist();
-      return { ok: true };
-    },
-    resetSchedule: function () {
-      try { if (global.localStorage) global.localStorage.removeItem(SCHED_KEY); } catch (e) {}
-      return { ok: true };
     },
 
     reschedule: function (id, dateS, startMin) {
@@ -728,8 +595,8 @@
       b.updatedAt = nowIso();
       b.history = b.history || [];
       b.history.push({ at: nowIso(), action: 'rescheduled', detail: 'Moved from ' + from + ' to ' + U.rangeLabel(dateS, startMin, b.minutes, CLINIC_TZ) });
-      notifyWaitlist();
       announce();
+      if (Store.isCloud()) Store.sync.push('reschedule', b, { date: dateS, startMin: startMin });
       return { ok: true, booking: b };
     },
 
@@ -742,6 +609,7 @@
       b.history = b.history || [];
       b.history.push({ at: nowIso(), action: 'edited', detail: 'Customer details updated' });
       announce();
+      if (Store.isCloud()) Store.sync.push('update', b, { customer: patch });
       return { ok: true, booking: b };
     },
 
@@ -751,37 +619,23 @@
       b.reminder = reminder;
       b.updatedAt = nowIso();
       announce();
+      if (Store.isCloud()) Store.sync.push('update', b, { reminder: reminder });
       return { ok: true, booking: b };
     },
 
     /* --- waitlist --- */
 
     joinWaitlist: function (p) {
-      var email = String(p.email || '').trim().toLowerCase();
-      var dup = waitlist.filter(function (w) {
-        return (w.status === 'waiting' || w.status === 'notified') && w.email === email && w.serviceId === p.serviceId &&
-          (w.providerId || '') === (p.providerId || '') && w.date === p.date;
-      })[0];
-      if (dup) return { ok: true, entry: dup, existing: true };
       var entry = {
-        id: uid('wl'), serviceId: p.serviceId, providerId: p.providerId || '', date: p.date,
-        email: email, name: String(p.name || '').trim(),
+        id: uid('wl'), serviceId: p.serviceId, providerId: p.providerId, date: p.date,
+        email: String(p.email || '').trim().toLowerCase(), name: String(p.name || '').trim(),
         createdAt: nowIso(), status: 'waiting'
       };
       waitlist.push(entry);
       writeJSON(WAIT_KEY, waitlist);
       announce();
+      if (Store.isCloud()) Store.sync.pushWaitlist(entry);
       return { ok: true, entry: entry };
-    },
-    leaveWaitlist: function (id) {
-      waitlist = waitlist.filter(function (w) { return w.id !== id; });
-      writeJSON(WAIT_KEY, waitlist);
-      announce();
-    },
-    /* waitlist entries for one customer that are still live */
-    waitlistFor: function (email) {
-      email = String(email || '').trim().toLowerCase();
-      return waitlist.filter(function (w) { return w.email === email && (w.status === 'waiting' || w.status === 'notified'); });
     },
     waitlistAll: function () { return waitlist.slice(); },
 
@@ -803,6 +657,7 @@
         'Please use fragrance-free products.', 'May arrive a few minutes early.', '', ''];
       var reminders = ['none', '1h', '1d'];
       var created = 0, i = 0, guard = 0;
+      var startLen = list.length;
       var base = todayStr(CLINIC_TZ);
       while (created < count && guard < count * 40) {
         guard++;
@@ -847,12 +702,14 @@
         });
         created++;
       }
-      waitlist = waitlist.concat([
+      var madeWait = [
         { id: uid('wl'), serviceId: 'hilot', providerId: 'ren', date: addDaysStr(base, 9), email: 'waiting@example.com', name: 'Wendy Clark', createdAt: nowIso(), status: 'waiting' },
         { id: uid('wl'), serviceId: 'rebond', providerId: 'ada', date: addDaysStr(base, 4), email: 'queue@example.com', name: 'Noah Bennett', createdAt: nowIso(), status: 'waiting' }
-      ]);
+      ];
+      waitlist = waitlist.concat(madeWait);
       writeJSON(WAIT_KEY, waitlist);
       announce();
+      if (Store.isCloud()) Store.sync.importMany(list.slice(startLen), madeWait);
       return created;
     }
   };
@@ -936,7 +793,6 @@
   var NS = {
     CLINIC_TZ: CLINIC_TZ,
     CURRENCY: CURRENCY,
-    GCASH: GCASH,
     SERVICES: SERVICES,
     PROVIDERS: PROVIDERS,
     CLOSURES: CLOSURES,
@@ -950,7 +806,6 @@
     BOOKING_WINDOW_DAYS: BOOKING_WINDOW_DAYS,
     uid: uid,
     nowIso: nowIso,
-    SCHED_KEY: SCHED_KEY,
     STORE_KEY: STORE_KEY,
     WAIT_KEY: WAIT_KEY
   };

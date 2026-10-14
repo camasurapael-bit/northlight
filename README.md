@@ -146,8 +146,8 @@ To change currency again: edit the single `CURRENCY` object at the top of `js/st
 
 ## Notes & limits
 
-- Data lives in the browser (`localStorage`), so it is per-device — clearing site data resets it.
-  Swap `Store` for HTTP calls to make it multi-user; the rest of the app is already written against that API.
+- Without the shared database (see below) data lives in the browser (`localStorage`), so it is per-device.
+  With it, bookings live in Supabase and are shared across devices.
 - Emails are "queued" in the UI copy only; there is no SMTP in a static app.
 - Reminders require the tab to be open (browser Notification API limitation).
 
@@ -211,22 +211,46 @@ reload, is prefilled into the booking form, and is cleared by **Sign out** in th
 
 ---
 
-## Latest features (Oct 2026)
+## Shared database (Supabase)
 
-**Customer side**
-- **Several services in one visit** — tap more than one service; only specialists who offer all of them are shown, and the slot is the combined length.
-- **Payment choice** — *Pay at the salon* (confirmed straight away) or *Pay now with GCash* (slot is held as **pending** until staff confirm the payment). Set the real number in `js/store.js` → `GCASH`.
-- **Waitlist** — a full day shows *Notify me if a slot opens*. When someone cancels or moves, the waiting customer sees a banner under **Next up** and in **My bookings**.
-- **My bookings** — Upcoming / Past / All tabs, **Book again**, and **Rate visit** (1–5 stars + comment). Specialist cards show their average rating.
-- **Gmail code sign-in** — `api/send-otp.js` + `api/verify-otp.js` (Vercel serverless, Brevo). Vercel → Settings → Environment Variables: `BREVO_API_KEY` (xkeysib-…), `OTP_SENDER_EMAIL` (a sender verified in Brevo), `OTP_SECRET` (long random text). Codes are signed, never stored, expire in 5 minutes.
-- **Theme** follows the phone (light/dark) until you tap the toggle; **installable app** (PWA: `manifest.webmanifest`, `sw.js`, `icons/`); **English / Tagalog** switch (`js/i18n.js`, edit the `TL` table to change wording).
+Bookings and the waitlist are stored in **Supabase**; Firebase is still used only for Google sign-in and is untouched.
+The browser never holds a database key: it calls `/api/bookings` (a Vercel function), which talks to Supabase with a
+secret key kept in Vercel. If the API is not set up yet, or the page is opened as `file://`, the app silently falls
+back to `localStorage` exactly as before.
 
-**Staff side** (Admin tab → staff sign-in)
-- Confirm GCash payments, reschedule, cancel, complete, mark paid.
-- **+ Walk-in** booking (ignores the 2-hour notice rule).
-- **Staff schedule** — weekly hours per specialist, days off, whole-studio closures.
-- **Report** — today / week / month / custom range, totals by service and specialist, collected vs. still to collect, print/PDF and CSV, plus reviews.
+### One-time setup
 
-**Tests:** `node tests/engine.test.js` (79 checks) and `node tests/otp.test.js` (9 checks).
+1. **Supabase → SQL Editor → New query**: paste `supabase/schema.sql` and **Run**. It creates `bookings` and
+   `waitlist`, turns Row Level Security on with no public policies, and adds a database rule that makes two
+   overlapping bookings for one specialist impossible.
+2. **Vercel → Project → Settings → Environment Variables** (then **Redeploy**):
 
-**Known limits (front-end only):** bookings, waitlist and schedule live in each browser's localStorage, so a booking made on a phone is not visible on the admin's laptop. A shared database (Firebase Firestore) is the next step. The staff password is hashed in `js/admin.js` but still ships to the browser.
+   | Name | Value |
+   |---|---|
+   | `SUPABASE_URL` | `https://<project-ref>.supabase.co` |
+   | `SUPABASE_SECRET_KEY` | Supabase → Project Settings → API Keys → **Secret key** (`sb_secret_…`). Server only — never in the browser or GitHub |
+   | `ADMIN_PASSCODE` | the same password you type in the staff sign-in (the server re-checks it) |
+
+   Optional: `FIREBASE_PROJECT_ID` (defaults to `northlight-cc676`).
+3. Open the site. Book something, then open it on another device: the slot is taken there too.
+
+### How it behaves
+
+| | |
+|---|---|
+| Double booking | Checked in the browser, again on the server, and finally by the database itself |
+| Who can see a booking | Anyone with its reference (`BK-XXXXXX`), or the Google user whose verified email it was booked with. Searching a bare email shows nothing |
+| Other people's slots | The calendar receives only blocked times (no names, emails or phones) |
+| Staff dashboard | Loads all bookings after the server accepts `ADMIN_PASSCODE`; signing out clears them from the device |
+| Sync | Each tab refreshes every 20 s and when it becomes visible again; same-device tabs update instantly |
+| Old test bookings | Bookings that exist only in a browser's `localStorage` and not on the server disappear once the shared database is on |
+
+Gmail one-time-code and email/password users have no server-verifiable sign-in, so they find bookings by reference
+(a booking made on a device stays visible on that device).
+
+### Tests
+
+```bash
+npm test      # engine, OTP, bookings API (fake Supabase), and an end-to-end two-device test
+```
+

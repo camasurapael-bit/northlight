@@ -6,13 +6,7 @@
 <title>Northlight Studio — Real-time Appointment Booking</title>
 <meta name="description" content="A real-time appointment booking system with a bento grid interface: availability engine, conflict prevention, ICS invites, reschedule, cancel and an admin dashboard." />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%236c8cff'/><rect x='22' y='30' width='56' height='48' rx='10' fill='%230b0d14'/><rect x='22' y='22' width='56' height='14' rx='7' fill='%23a06bff'/></svg>" />
-<meta name="theme-color" content="#0b0d14" />
-<link rel="manifest" href="manifest.webmanifest" />
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-title" content="Northlight" />
 <link rel="stylesheet" href="styles.css" />
-<script src="js/theme.js"></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
@@ -27,7 +21,6 @@
     <button type="button" class="tab" data-goto="book" aria-current="page">Book</button>
     <button type="button" class="tab" data-goto="mine">My bookings</button>
     <button type="button" class="tab" data-goto="admin">Admin</button>
-    <button type="button" class="tab lang-tab" id="langTab" data-noi18n>🌐 Language: English</button>
   </nav>
 
   <div class="topbar-right">
@@ -37,8 +30,7 @@
       <button type="button" id="tzBtn" class="input input-sm tz-btn" aria-haspopup="dialog"><span id="tzBtnLabel">PHT</span><span aria-hidden="true">▾</span></button>
     </label>
     <button type="button" id="userBadge" class="user-badge" hidden aria-label="Your account"></button>
-    <button type="button" id="themeToggle" class="icon-btn" aria-label="Toggle colour theme" title="Toggle light / dark"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></button>
-    <button type="button" id="langToggle" class="icon-btn lang-btn" aria-label="Change language" title="English / Tagalog">TL</button>
+    <button type="button" id="themeToggle" class="icon-btn" aria-label="Toggle colour theme" title="Toggle light / dark">◐</button>
   </div>
 
   <button type="button" id="navToggle" class="icon-btn nav-toggle" aria-label="Toggle navigation" aria-expanded="false">☰</button>
@@ -176,14 +168,12 @@
     <div id="nextBody" class="next-body">
       <p class="empty sm">No upcoming appointments yet.</p>
     </div>
-    <div id="waitNotes" class="wait-notes"></div>
   </section>
 
   <!-- SERVICES -->
   <section class="tile tile-services" data-views="book">
-    <header class="tile-head"><h2><span class="step">1</span> Choose service(s)</h2><span class="chip" id="serviceChip">nothing selected</span></header>
-    <p class="muted sm" style="margin:0 0 8px">Tap more than one to combine them in a single visit.</p>
-    <div class="service-list" id="serviceList" role="group" aria-label="Choose one or more services"></div>
+    <header class="tile-head"><h2><span class="step">1</span> Choose a service</h2><span class="chip" id="serviceChip">nothing selected</span></header>
+    <div class="service-list" id="serviceList" role="radiogroup" aria-label="Choose a service"></div>
   </section>
 
   <!-- PROVIDERS -->
@@ -220,7 +210,6 @@
     <div class="slot-grid" id="slotGrid" role="listbox" aria-label="Available times"></div>
     <p class="muted sm" id="slotHint">Times are shown in your selected timezone.</p>
     <button type="button" class="btn btn-ghost btn-sm" id="nextFreeBtn" hidden>Jump to the next free day</button>
-    <button type="button" class="btn btn-primary btn-sm" id="waitBtn" hidden>🔔 Notify me if a slot opens this day</button>
   </section>
 
   <!-- FORM -->
@@ -257,21 +246,6 @@
         <textarea class="input" id="bkNotes" name="notes" rows="3" maxlength="500" placeholder="Context, links, agenda…" aria-describedby="notesCount"></textarea>
         <p class="hint" id="notesCount">0 / 500</p>
       </div>
-      <fieldset class="pay-box" id="payBox" hidden>
-        <legend>Payment</legend>
-        <label class="radio-row"><input type="radio" name="payMethod" value="salon" checked /><span><b>Pay at the salon</b><small>Cash, GCash or card on the day. Your slot is confirmed right away.</small></span></label>
-        <label class="radio-row"><input type="radio" name="payMethod" value="gcash" /><span><b>Pay now with GCash</b><small>Your slot is held until we confirm your payment.</small></span></label>
-        <div id="gcashBox" class="gcash-box" hidden>
-          <p class="sm" style="margin:0 0 6px">Send <strong id="gcashAmt">&#8369;0</strong> to GCash number:</p>
-          <p class="gcash-num"><strong id="gcashNum">—</strong> <button type="button" class="btn btn-ghost btn-sm" id="gcashCopy">Copy</button></p>
-          <p class="muted sm" style="margin:0 0 8px">Account name: <span id="gcashName">—</span></p>
-          <div class="field" style="margin:0">
-            <label for="bkPayRef">GCash reference number <span class="req">*</span></label>
-            <input class="input" id="bkPayRef" inputmode="text" autocomplete="off" maxlength="20" placeholder="e.g. 1234567890123" aria-describedby="errPayRef" />
-            <p class="err" id="errPayRef" role="alert"></p>
-          </div>
-        </div>
-      </fieldset>
       <label class="check">
         <input type="checkbox" id="bkConsent" required aria-describedby="errConsent" />
         <span>I agree to the cancellation policy (free up to 24h before) and to receive a confirmation email.</span>
@@ -294,18 +268,12 @@
       <input class="input" id="lookupInput" type="text" placeholder="ada@example.com or BK-4KQ7T2" />
       <button type="submit" class="btn btn-primary">Find</button>
     </form>
-    <div id="mineWait" class="wait-notes"></div>
     <ul class="helper-list">
       <li><strong>Reschedule</strong> to any other free slot with the same specialist — your reference stays the same.</li>
       <li><strong>Cancel</strong> free of charge up to 24 hours before the start; later cancellations follow the fee policy.</li>
       <li><strong>Reinstate</strong> a cancelled booking while the slot is still free.</li>
       <li>Every booking keeps a full <strong>audit trail</strong> — open <em>Details</em> to read it.</li>
     </ul>
-    <div class="mine-tabs" id="mineTabs" role="tablist" aria-label="Bookings">
-      <button type="button" class="mine-tab" role="tab" data-mt="upcoming" aria-selected="true">Upcoming <span class="count" id="mtUp">0</span></button>
-      <button type="button" class="mine-tab" role="tab" data-mt="past" aria-selected="false">Past <span class="count" id="mtPast">0</span></button>
-      <button type="button" class="mine-tab" role="tab" data-mt="all" aria-selected="false">All <span class="count" id="mtAll">0</span></button>
-    </div>
     <div id="mineList" class="mine-list"></div>
   </section>
 
@@ -342,8 +310,6 @@
         <div class="stat"><span class="stat-k">Revenue booked</span><strong class="stat-v" id="statRevenue">&#8369;0</strong><span class="stat-s" id="statRevenueSub">—</span></div>
         <div class="stat"><span class="stat-k">Utilisation</span><strong class="stat-v" id="statUtil">0%</strong><span class="stat-s" id="statUtilSub">—</span></div>
         <div class="stat"><span class="stat-k">Avg. lead time</span><strong class="stat-v" id="statLead">0d</strong><span class="stat-s" id="statLeadSub">—</span></div>
-        <div class="stat"><span class="stat-k">Awaiting payment</span><strong class="stat-v" id="statPending">0</strong><span class="stat-s" id="statPendingSub">—</span></div>
-        <div class="stat"><span class="stat-k">Average rating</span><strong class="stat-v" id="statRating">—</strong><span class="stat-s" id="statRatingSub">—</span></div>
         <div class="stat"><span class="stat-k">Cancellation rate</span><strong class="stat-v" id="statCancel">0%</strong><span class="stat-s" id="statCancelSub">—</span></div>
       </div>
 
@@ -356,17 +322,14 @@
         <label class="field-inline"><span>Specialist</span><select class="input input-sm" id="fProvider"></select></label>
         <label class="field-inline"><span>Service</span><select class="input input-sm" id="fService"></select></label>
         <label class="field-inline"><span>Status</span><select class="input input-sm" id="fStatus">
-          <option value="">All</option><option value="pending">Pending payment</option><option value="confirmed">Confirmed</option><option value="cancelled">Cancelled</option><option value="completed">Completed</option>
+          <option value="">All</option><option value="confirmed">Confirmed</option><option value="cancelled">Cancelled</option><option value="completed">Completed</option>
         </select></label>
         <label class="field-inline"><span>From</span><input class="input input-sm" id="fFrom" type="date" /></label>
         <label class="field-inline"><span>To</span><input class="input input-sm" id="fTo" type="date" /></label>
         <label class="field-inline"><span>Search</span><input class="input input-sm" id="fSearch" type="search" placeholder="name, email, ref" /></label>
         <div class="filter-actions">
           <button type="button" class="btn btn-ghost btn-sm" id="fReset">Reset</button>
-          <button type="button" class="btn btn-primary btn-sm" id="adminWalkIn">+ Walk-in</button>
-          <button type="button" class="btn btn-ghost btn-sm" id="adminSchedule">Staff schedule</button>
-          <button type="button" class="btn btn-ghost btn-sm" id="adminReport">Report</button>
-          <button type="button" class="btn btn-ghost btn-sm" id="exportCsv">Export CSV</button>
+          <button type="button" class="btn btn-primary btn-sm" id="exportCsv">Export CSV</button>
           <button type="button" class="btn btn-ghost btn-sm" id="seedDemo">Load demo data</button>
         </div>
       </div>
@@ -429,10 +392,9 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="js/store.js"></script>
+<script src="js/cloud.js"></script>
 <script src="js/app.js"></script>
 <script src="js/admin.js"></script>
 <script src="js/auth.js"></script>
-<script src="js/i18n.js"></script>
-<script>if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) window.addEventListener("load", function () { navigator.serviceWorker.register("sw.js").catch(function () {}); });</script>
 </body>
 </html>
