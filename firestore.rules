@@ -1,0 +1,62 @@
+rules_version = '2';
+
+// Northlight Studio — Firestore security rules.
+// Publish in: Firebase Console > Firestore Database > Rules > Publish.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isStaff()  { return signedIn() && exists(/databases/$(database)/documents/staff/$(request.auth.uid)); }
+    // anonymous visitors have no email in their token; Google / email sign-ins do
+    function hasEmail() { return signedIn() && 'email' in request.auth.token; }
+    function isOwner(d) {
+      return signedIn() && (d.uid == request.auth.uid || (hasEmail() && d.customer.email == request.auth.token.email));
+    }
+
+    // Who is staff: documents are added by hand in the console, nobody can write them from the app.
+    match /staff/{userId} {
+      allow get: if signedIn() && request.auth.uid == userId;
+    }
+
+    // One document per booking, named after its reference (BK-XXXXXX).
+    match /bookings/{bookingId} {
+      allow get: if true;                                    // look up a booking by its reference
+      allow list: if isStaff() || isOwner(resource.data);    // staff: all; customers: only their own
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.ref == bookingId
+        && request.resource.data.status in ['pending', 'confirmed']
+        && request.resource.data.customer.name is string && request.resource.data.customer.name.size() <= 80
+        && request.resource.data.customer.email is string && request.resource.data.customer.email.size() <= 120;
+      allow update: if isStaff() || (isOwner(resource.data)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.ref == resource.data.ref
+        && request.resource.data.price == resource.data.price
+        && request.resource.data.payment == resource.data.payment
+        && request.resource.data.status in ['pending', 'confirmed', 'cancelled']
+        && (request.resource.data.status == 'cancelled'
+            || request.resource.data.status == resource.data.status
+            || resource.data.payment.status != 'awaiting'));
+      allow delete: if isStaff();
+    }
+
+    // Times that are taken, per specialist per day. No names, no emails.
+    match /days/{dayId} {
+      allow read: if true;
+      allow create: if isStaff() || (signedIn()
+        && request.resource.data.keys().hasOnly(['providerId', 'date', 'items'])
+        && request.resource.data.items.size() <= 1);
+      allow update: if isStaff() || (signedIn()
+        && request.resource.data.keys().hasOnly(['providerId', 'date', 'items'])
+        && request.resource.data.items.size() <= 80
+        && math.abs(request.resource.data.items.size() - resource.data.items.size()) <= 1);
+      allow delete: if isStaff();
+    }
+
+    // Weekly hours, days off, closures.
+    match /schedule/{docId} {
+      allow read: if true;
+      allow write: if isStaff();
+    }
+  }
+}

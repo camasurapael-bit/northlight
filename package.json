@@ -1,0 +1,5 @@
+{
+  "name": "northlight-studio",
+  "private": true,
+  "engines": { "node": ">=18" }
+}
