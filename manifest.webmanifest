@@ -1,0 +1,16 @@
+{
+  "name": "Northlight Studio",
+  "short_name": "Northlight",
+  "description": "Book salon appointments with the Northlight Studio team.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0d14",
+  "theme_color": "#0b0d14",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
