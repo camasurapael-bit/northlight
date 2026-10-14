@@ -47,7 +47,6 @@
   function lockDashboard(silent) {
     unlocked = false;
     dropSession();
-    if (NS.Cloud) NS.Cloud.clearAdmin();
     $('adminPanel').hidden = true;
     $('adminGate').hidden = false;
     $('adminLogout').hidden = true;
@@ -88,9 +87,7 @@
       if (!user || !pass) { setErr('Enter your staff username and password.'); return; }
       sha256('northlight:' + user + ':' + pass).then(function (h) {
         if (user === ADMIN_USER && h === ADMIN_HASH) {
-          tries = 0; setErr(''); saveSession();
-          if (NS.Cloud) NS.Cloud.setAdmin(pass);   // the server re-checks this password (ADMIN_PASSCODE)
-          showDashboard();
+          tries = 0; setErr(''); saveSession(); showDashboard();
           NS.app.toast('ok', 'Welcome back', 'Staff dashboard is live.');
         } else {
           tries++;
@@ -108,6 +105,9 @@
     });
 
     $('exportCsv').addEventListener('click', exportCsv);
+    $('adminWalkIn').addEventListener('click', openWalkIn);
+    $('adminReport').addEventListener('click', openReport);
+    $('adminSchedule').addEventListener('click', openSchedule);
 
     Store.on('change', function () { if (unlocked) render(); });
   }
@@ -199,6 +199,12 @@
     $('statUtilSub').textContent = 'next 7 days of studio hours';
     $('statLead').textContent = leadDays + 'd';
     $('statLeadSub').textContent = 'average booking lead time';
+    var pend = all.filter(function (b) { return b.status === 'pending'; });
+    $('statPending').textContent = pend.length;
+    $('statPendingSub').textContent = U.money(pend.reduce(function (a, b) { return a + (b.price || 0); }, 0)) + ' to verify';
+    var rt = Store.ratingFor();
+    $('statRating').textContent = rt.count ? rt.avg.toFixed(1) + ' ★' : '—';
+    $('statRatingSub').textContent = rt.count + ' review' + (rt.count === 1 ? '' : 's');
     $('statCancel').textContent = cancelRate + '%';
     $('statCancelSub').textContent = cancelled.length + ' cancelled bookings';
 
@@ -236,7 +242,9 @@
       var when = U.display(b.date, b.startMin, tz);
       var past = U.instantOf(b.date, b.startMin).getTime() < now;
       var actions = '<div class="row-actions">' +
-        (b.status === 'confirmed' ? '<button class="btn btn-ghost btn-sm" data-a="complete" data-id="' + b.id + '" title="Mark completed">✓</button>' +
+        (b.status === 'pending' ? '<button class="btn btn-primary btn-sm" data-a="confirm" data-id="' + b.id + '" title="Payment received — confirm booking">Confirm</button>' : '') +
+        (b.status === 'confirmed' ? '<button class="btn btn-ghost btn-sm" data-a="complete" data-id="' + b.id + '" title="Mark completed">✓</button>' : '') +
+        ((b.status === 'confirmed' || b.status === 'pending') ? '<button class="btn btn-ghost btn-sm" data-a="resched" data-id="' + b.id + '" title="Reschedule">↻</button>' +
           '<button class="btn btn-ghost btn-sm" data-a="cancel" data-id="' + b.id + '" title="Cancel booking">✕</button>' : '') +
         (b.status === 'cancelled' ? '<button class="btn btn-ghost btn-sm" data-a="reinstate" data-id="' + b.id + '" title="Reinstate">↺</button>' : '') +
         '<button class="btn btn-ghost btn-sm" data-a="detail" data-id="' + b.id + '" title="Detail">⋯</button>' +
@@ -247,8 +255,8 @@
         '<td>' + U.escapeHtml(U.shortDate(when.dateStr)) + ' · ' + U.minutesToTime(b.startMin) + '–' + U.minutesToTime(b.startMin + b.minutes) + '</td>' +
         '<td>' + U.escapeHtml(s.name) + '</td>' +
         '<td>' + U.escapeHtml(p.name) + '</td>' +
-        '<td>' + U.escapeHtml(b.customer.name) + '<br><span class="muted" style="font-size:11px">' + U.escapeHtml(b.customer.email) + '</span></td>' +
-        '<td><span class="badge ' + b.status + '">' + b.status + '</span></td>' +
+        '<td>' + U.escapeHtml(b.customer.name) + (b.source === 'walk-in' ? ' <span class="pill">walk-in</span>' : '') + '<br><span class="muted" style="font-size:11px">' + U.escapeHtml(b.customer.email || b.customer.phone || '') + '</span></td>' +
+        '<td><span class="badge ' + b.status + '">' + b.status + '</span>' + payBadge(b) + '</td>' +
         '<td>' + actions + '</td></tr>';
     }).join('');
 
@@ -259,6 +267,8 @@
         if (!b) return;
         if (a === 'ics') NS.app.downloadIcs(b);
         else if (a === 'detail') openAdminDetail(b);
+        else if (a === 'confirm') { Store.confirmPayment(b.id); NS.app.toast('ok', 'Payment confirmed', b.ref + ' is now confirmed.'); }
+        else if (a === 'resched') openAdminResched(b);
         else if (a === 'complete') { Store.setStatus(b.id, 'completed', 'Completed by staff'); NS.app.toast('ok', 'Marked completed', b.ref); }
         else if (a === 'cancel') { Store.setStatus(b.id, 'cancelled', 'Cancelled by staff'); NS.app.toast('ok', 'Booking cancelled', b.ref + ' slot released.'); }
         else if (a === 'reinstate') {
@@ -295,6 +305,269 @@
     ]);
   }
 
+
+  /* ============================================================
+     admin tools: slot picker · reschedule · walk-in · report · schedule
+     ============================================================ */
+  function payBadge(b) {
+    var pay = b.payment; if (!pay || pay.method === 'free') return '';
+    var label = pay.status === 'paid' ? 'paid' : pay.status === 'awaiting' ? 'GCash · awaiting' : (pay.method === 'salon' ? 'pay at salon' : 'unpaid');
+    return '<br><span class="muted" style="font-size:11px">' + U.escapeHtml(label) + '</span>';
+  }
+
+  function hhmm(min) { return U.minutesToTime(min); }
+  function toMin(v) { var m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; }
+  function el(html) { var d = document.createElement('div'); d.innerHTML = html; return d; }
+
+  /* date input + free-slot grid for one provider/service. get() -> {date, start} or null */
+  function slotPicker(host, cfg) {
+    host.innerHTML =
+      '<div class="field"><label>Date (clinic time)</label><input class="input" type="date" data-sp="date" /></div>' +
+      '<p class="hint" data-sp="hint">Choose a date, then a free time.</p>' +
+      '<div class="slot-grid" data-sp="grid" style="max-height:220px"></div>';
+    var dateI = host.querySelector('[data-sp=date]'), grid = host.querySelector('[data-sp=grid]'), hint = host.querySelector('[data-sp=hint]');
+    var chosen = null;
+    dateI.value = cfg.date || U.todayStr(NS.CLINIC_TZ);
+    dateI.min = cfg.walkIn ? U.todayStr(NS.CLINIC_TZ) : U.todayStr(NS.CLINIC_TZ);
+    function paint() {
+      chosen = null;
+      var c = cfg.ctx();
+      if (!c.providerId || !c.serviceId) { grid.innerHTML = '<p class="empty sm">Pick a service and specialist first.</p>'; hint.textContent = ''; return; }
+      var res = Store.slotsFor(c.providerId, c.serviceId, dateI.value, { excludeId: cfg.excludeId, walkIn: cfg.walkIn });
+      if (res.state !== 'open') { grid.innerHTML = '<p class="empty sm">' + (res.state === 'not-offered' ? 'This specialist does not offer that service.' : 'Closed or unavailable that day.') + '</p>'; hint.textContent = ''; return; }
+      grid.innerHTML = res.slots.map(function (sl) {
+        return '<button type="button" class="slot" data-s="' + sl.start + '"' + (sl.free ? '' : ' disabled') + ' aria-selected="false">' + hhmm(sl.start) + '</button>';
+      }).join('');
+      hint.textContent = res.free + ' free of ' + res.total + ' times.';
+      Array.prototype.forEach.call(grid.querySelectorAll('[data-s]'), function (b) {
+        b.addEventListener('click', function () {
+          chosen = parseInt(b.getAttribute('data-s'), 10);
+          Array.prototype.forEach.call(grid.querySelectorAll('[data-s]'), function (o) { o.setAttribute('aria-selected', 'false'); });
+          b.setAttribute('aria-selected', 'true');
+        });
+      });
+    }
+    dateI.addEventListener('change', paint);
+    paint();
+    return { repaint: paint, get: function () { return chosen === null ? null : { date: dateI.value, start: chosen }; } };
+  }
+
+  function openAdminResched(b) {
+    var body = el('<p class="muted sm">Moving <strong>' + U.escapeHtml(b.ref) + '</strong> (' + U.escapeHtml((Store.serviceById(b.serviceId) || {}).name) + ' with ' + U.escapeHtml((Store.providerById(b.providerId) || {}).name) + ').</p><div data-host></div>');
+    var sp = slotPicker(body.querySelector('[data-host]'), { date: b.date, excludeId: b.id, ctx: function () { return { providerId: b.providerId, serviceId: b.serviceId }; } });
+    NS.app.openModal('Reschedule ' + b.ref, body, [
+      { label: 'Move booking', cls: 'btn-primary', onClick: function () {
+          var pick = sp.get();
+          if (!pick) { NS.app.toast('bad', 'Pick a time', 'Select a free slot first.'); return; }
+          var r = Store.reschedule(b.id, pick.date, pick.start);
+          if (!r.ok) { NS.app.toast('bad', 'Could not move', 'That slot was just taken.'); sp.repaint(); return; }
+          NS.app.closeModal(); NS.app.toast('ok', 'Booking moved', b.ref + ' is now ' + U.shortDate(pick.date) + ' ' + hhmm(pick.start) + '.');
+        } },
+      { label: 'Cancel', cls: 'btn-ghost', onClick: NS.app.closeModal }
+    ]);
+  }
+
+  /* ---------- walk-in ---------- */
+  function openWalkIn() {
+    var body = el(
+      '<div class="field"><label>Services <span class="muted">(pick one or more)</span></label><div class="chip-pick" data-svc>' +
+      NS.SERVICES.map(function (s) {
+        return '<label class="chk-pill"><input type="checkbox" value="' + s.id + '" /><span>' + U.escapeHtml(s.emoji + ' ' + s.name) + ' · ' + (s.price ? U.money(s.price) : 'Free') + '</span></label>';
+      }).join('') + '</div></div>' +
+      '<div class="field"><label>Specialist</label><select class="input" data-prov></select></div>' +
+      '<div data-host></div>' +
+      '<div class="field-row"><div class="field"><label>Customer name</label><input class="input" data-name placeholder="Walk-in guest" /></div>' +
+      '<div class="field"><label>Phone <span class="opt">optional</span></label><input class="input" data-phone type="tel" /></div></div>' +
+      '<div class="field"><label>Email <span class="opt">optional</span></label><input class="input" data-email type="email" placeholder="so they can look it up later" /></div>' +
+      '<label class="check"><input type="checkbox" data-paid /><span>Already paid (cash / GCash at the counter)</span></label>' +
+      '<p class="err" data-err role="alert"></p>');
+    var provSel = body.querySelector('[data-prov]');
+    function serviceId() {
+      var ids = Array.prototype.map.call(body.querySelectorAll('[data-svc] input:checked'), function (i) { return i.value; });
+      return ids.length ? Store.bundleId(ids) : '';
+    }
+    function fillProviders() {
+      var sid = serviceId();
+      var pool = sid ? Store.providersFor(sid) : [];
+      var keep = provSel.value;
+      provSel.innerHTML = sid ? (pool.length ? pool.map(function (p) { return '<option value="' + p.id + '">' + U.escapeHtml(p.name) + '</option>'; }).join('')
+        : '<option value="">No one offers all of these together</option>') : '<option value="">Pick a service first</option>';
+      if (pool.some(function (p) { return p.id === keep; })) provSel.value = keep;
+    }
+    var sp = slotPicker(body.querySelector('[data-host]'), { walkIn: true, ctx: function () { return { providerId: provSel.value, serviceId: serviceId() }; } });
+    Array.prototype.forEach.call(body.querySelectorAll('[data-svc] input'), function (i) { i.addEventListener('change', function () { fillProviders(); sp.repaint(); }); });
+    provSel.addEventListener('change', sp.repaint);
+    fillProviders();
+    NS.app.openModal('New walk-in booking', body, [
+      { label: 'Add booking', cls: 'btn-primary', onClick: function () {
+          var err = body.querySelector('[data-err]'), pick = sp.get(), sid = serviceId();
+          if (!sid || !provSel.value) { err.textContent = 'Choose a service and a specialist.'; return; }
+          if (!pick) { err.textContent = 'Choose a free time.'; return; }
+          var r = Store.book({ walkIn: true, serviceId: sid, providerId: provSel.value, date: pick.date, startMin: pick.start,
+            name: body.querySelector('[data-name]').value, phone: body.querySelector('[data-phone]').value,
+            email: body.querySelector('[data-email]').value, payMethod: 'cash', paid: body.querySelector('[data-paid]').checked, tz: NS.CLINIC_TZ });
+          if (!r.ok) { err.textContent = 'That time was just taken — pick another.'; sp.repaint(); return; }
+          NS.app.closeModal(); NS.app.toast('ok', 'Walk-in added', r.booking.ref + ' · ' + U.shortDate(pick.date) + ' ' + hhmm(pick.start));
+        } },
+      { label: 'Cancel', cls: 'btn-ghost', onClick: NS.app.closeModal }
+    ]);
+  }
+
+  /* ---------- report ---------- */
+  function rangeFor(kind, from, to) {
+    var today = U.todayStr(NS.CLINIC_TZ), wd = U.weekdayOf(today);
+    if (kind === 'today') return [today, today];
+    if (kind === 'week') { var mon = U.addDaysStr(today, -((wd + 6) % 7)); return [mon, U.addDaysStr(mon, 6)]; }
+    if (kind === 'month') { var p = U.parseDateStr(today); var first = U.dateStrOf(p.y, p.m, 1); var nx = p.m === 12 ? U.dateStrOf(p.y + 1, 1, 1) : U.dateStrOf(p.y, p.m + 1, 1); return [first, U.addDaysStr(nx, -1)]; }
+    return [from || today, to || from || today];
+  }
+
+  function buildReport(a, b) {
+    var rows = Store.all().filter(function (x) { return x.date >= a && x.date <= b; });
+    var live = rows.filter(function (x) { return x.status !== 'cancelled'; });
+    var done = rows.filter(function (x) { return x.status === 'completed'; });
+    var money = function (list) { return list.reduce(function (t, x) { return t + (x.price || 0); }, 0); };
+    var paid = live.filter(function (x) { return x.payment && x.payment.status === 'paid'; });
+    var by = function (keyFn, nameFn) {
+      var m = {};
+      live.forEach(function (x) { var k = keyFn(x); m[k] = m[k] || { name: nameFn(x), n: 0, rev: 0 }; m[k].n++; m[k].rev += x.price || 0; });
+      return Object.keys(m).map(function (k) { return m[k]; }).sort(function (p, q) { return q.rev - p.rev || q.n - p.n; });
+    };
+    var rating = (function () { var r = rows.filter(function (x) { return x.review; }); return { n: r.length, avg: r.length ? r.reduce(function (t, x) { return t + x.review.stars; }, 0) / r.length : 0 }; })();
+    return {
+      from: a, to: b, total: rows.length, live: live.length, completed: done.length,
+      cancelled: rows.filter(function (x) { return x.status === 'cancelled'; }).length,
+      pending: rows.filter(function (x) { return x.status === 'pending'; }).length,
+      walkins: live.filter(function (x) { return x.source === 'walk-in'; }).length,
+      booked: money(live), collected: money(paid), outstanding: money(live) - money(paid),
+      byService: by(function (x) { return x.serviceId; }, function (x) { return (Store.serviceById(x.serviceId) || {}).name || x.serviceId; }),
+      byProvider: by(function (x) { return x.providerId; }, function (x) { return (Store.providerById(x.providerId) || {}).name || x.providerId; }),
+      rating: rating, rows: rows
+    };
+  }
+
+  function reportHtml(r) {
+    var tbl = function (title, list) {
+      return '<h3 style="font-size:13px;margin:14px 0 6px">' + title + '</h3><table class="table table-sm"><thead><tr><th>Name</th><th>Bookings</th><th>Booked value</th></tr></thead><tbody>' +
+        (list.length ? list.map(function (x) { return '<tr><td>' + U.escapeHtml(x.name) + '</td><td>' + x.n + '</td><td>' + U.money(x.rev) + '</td></tr>'; }).join('') : '<tr><td colspan="3" class="muted">No bookings in this range.</td></tr>') +
+        '</tbody></table>';
+    };
+    var span = r.from === r.to ? U.longDate(r.from) : U.longDate(r.from) + ' – ' + U.longDate(r.to);
+    return '<p class="muted sm">' + U.escapeHtml(span) + '</p>' +
+      '<div class="ticket">' +
+      '<div class="ticket-row"><span>Bookings (not cancelled)</span><strong>' + r.live + '</strong></div>' +
+      '<div class="ticket-row"><span>Completed</span><strong>' + r.completed + '</strong></div>' +
+      '<div class="ticket-row"><span>Cancelled</span><strong>' + r.cancelled + '</strong></div>' +
+      '<div class="ticket-row"><span>Awaiting payment (GCash)</span><strong>' + r.pending + '</strong></div>' +
+      '<div class="ticket-row"><span>Walk-ins</span><strong>' + r.walkins + '</strong></div>' +
+      '<div class="ticket-row"><span>Booked value</span><strong>' + U.money(r.booked) + '</strong></div>' +
+      '<div class="ticket-row"><span>Collected (paid)</span><strong>' + U.money(r.collected) + '</strong></div>' +
+      '<div class="ticket-row"><span>Still to collect</span><strong>' + U.money(r.outstanding) + '</strong></div>' +
+      '<div class="ticket-row"><span>Average rating</span><strong>' + (r.rating.n ? r.rating.avg.toFixed(1) + ' ★ (' + r.rating.n + ')' : '—') + '</strong></div></div>' +
+      tbl('By service', r.byService) + tbl('By specialist', r.byProvider);
+  }
+
+  function printReport(r) {
+    var w = window.open('', '_blank');
+    if (!w) { NS.app.toast('bad', 'Popup blocked', 'Allow popups to print the report.'); return; }
+    w.document.write('<title>Northlight report ' + r.from + ' to ' + r.to + '</title><style>body{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:28px;color:#111}h1{font-size:20px;margin:0}table{width:100%;border-collapse:collapse;margin:6px 0}td,th{padding:7px 8px;border-bottom:1px solid #e5e7eb;text-align:left}.ticket-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #e5e7eb}.muted{color:#666}h3{font-size:14px}</style>');
+    w.document.write('<h1>Northlight Studio — report</h1>' + reportHtml(r).replace(/class="table table-sm"/g, ''));
+    w.document.close(); w.focus(); setTimeout(function () { try { w.print(); } catch (e) {} }, 350);
+  }
+
+  function openReport() {
+    var kind = 'today', from = '', to = '';
+    var body = el('<div class="field"><label>Range</label><select class="input" data-kind>' +
+      '<option value="today">Today</option><option value="week">This week (Mon–Sun)</option><option value="month">This month</option><option value="custom">Custom dates</option></select></div>' +
+      '<div class="field-row" data-custom hidden><div class="field"><label>From</label><input class="input" type="date" data-from /></div><div class="field"><label>To</label><input class="input" type="date" data-to /></div></div>' +
+      '<div data-out></div>');
+    var cur = null;
+    function paint() {
+      kind = body.querySelector('[data-kind]').value;
+      body.querySelector('[data-custom]').hidden = kind !== 'custom';
+      from = body.querySelector('[data-from]').value; to = body.querySelector('[data-to]').value;
+      var rg = rangeFor(kind, from, to);
+      if (rg[0] > rg[1]) rg = [rg[1], rg[0]];
+      cur = buildReport(rg[0], rg[1]);
+      body.querySelector('[data-out]').innerHTML = reportHtml(cur);
+    }
+    ['[data-kind]', '[data-from]', '[data-to]'].forEach(function (q) { body.querySelector(q).addEventListener('change', paint); });
+    paint();
+    NS.app.openModal('Sales & bookings report', body, [
+      { label: 'Print / Save as PDF', cls: 'btn-primary', onClick: function () { printReport(cur); } },
+      { label: 'Download CSV', cls: 'btn-ghost', onClick: function () { exportRows(cur.rows, 'northlight-report-' + cur.from + '_' + cur.to + '.csv'); } },
+      { label: 'Reviews', cls: 'btn-ghost', onClick: openReviews },
+      { label: 'Close', cls: 'btn-ghost', onClick: NS.app.closeModal }
+    ]);
+  }
+
+  function openReviews() {
+    var rev = Store.all().filter(function (b) { return b.review; }).sort(function (a, b) { return b.review.at.localeCompare(a.review.at); });
+    var body = rev.length ? rev.map(function (b) {
+      var p = Store.providerById(b.providerId) || {};
+      return '<div class="ticket"><div class="ticket-row"><span>' + U.escapeHtml(b.customer.name) + ' → ' + U.escapeHtml(p.name || '') + '</span><strong>' + '★'.repeat(b.review.stars) + '☆'.repeat(5 - b.review.stars) + '</strong></div>' +
+        (b.review.text ? '<p class="sm" style="margin:6px 0 0">' + U.escapeHtml(b.review.text) + '</p>' : '') + '</div>';
+    }).join('') : '<p class="empty sm">No reviews yet. Customers can rate a visit from My bookings after it is done.</p>';
+    NS.app.openModal('Customer reviews', body, [{ label: 'Back to report', cls: 'btn-ghost', onClick: openReport }, { label: 'Close', cls: 'btn-primary', onClick: NS.app.closeModal }]);
+  }
+
+  /* ---------- staff schedule ---------- */
+  function openSchedule() {
+    var DAYS = [1, 2, 3, 4, 5, 6, 0];
+    var body = el('<p class="muted sm">Set each specialist&rsquo;s weekly hours (clinic time) and their days off. Changes apply to the booking calendar straight away.</p>' +
+      '<div class="field"><label>Specialist</label><select class="input" data-prov>' + NS.PROVIDERS.map(function (p) { return '<option value="' + p.id + '">' + U.escapeHtml(p.name) + ' — ' + U.escapeHtml(p.role) + '</option>'; }).join('') + '</select></div>' +
+      '<div data-hours></div><div class="form-actions"><button type="button" class="btn btn-primary btn-sm" data-save>Save weekly hours</button></div>' +
+      '<h3 style="font-size:13px;margin:16px 0 6px">Days off</h3><div class="lookup"><input class="input input-sm" type="date" data-off-date /><button type="button" class="btn btn-ghost btn-sm" data-off-add>Add day off</button></div><div data-offs class="chip-pick"></div>' +
+      '<h3 style="font-size:13px;margin:16px 0 6px">Studio closed for everyone</h3><div class="lookup"><input class="input input-sm" type="date" data-cl-date /><input class="input input-sm" data-cl-why placeholder="Reason (holiday…)" /><button type="button" class="btn btn-ghost btn-sm" data-cl-add>Close studio</button></div><div data-cls class="chip-pick"></div>');
+    var sel = body.querySelector('[data-prov]');
+    function cur() { return Store.getSchedule().providers.filter(function (p) { return p.id === sel.value; })[0]; }
+    function paintHours() {
+      var p = cur();
+      body.querySelector('[data-hours]').innerHTML = DAYS.map(function (d) {
+        var h = p.hours[d];
+        return '<div class="sched-row"><label class="check"><input type="checkbox" data-on="' + d + '"' + (h ? ' checked' : '') + ' /><span>' + U.WEEKDAYS[d] + '</span></label>' +
+          '<input class="input input-sm" type="time" data-open="' + d + '" value="' + hhmm(h ? h[0] : 540) + '"' + (h ? '' : ' disabled') + ' />' +
+          '<span class="muted">to</span><input class="input input-sm" type="time" data-close="' + d + '" value="' + hhmm(h ? h[1] : 1020) + '"' + (h ? '' : ' disabled') + ' /></div>';
+      }).join('');
+      Array.prototype.forEach.call(body.querySelectorAll('[data-on]'), function (c) {
+        c.addEventListener('change', function () {
+          var d = c.getAttribute('data-on');
+          body.querySelector('[data-open="' + d + '"]').disabled = !c.checked;
+          body.querySelector('[data-close="' + d + '"]').disabled = !c.checked;
+        });
+      });
+    }
+    function paintLists() {
+      var p = cur(), sc = Store.getSchedule();
+      body.querySelector('[data-offs]').innerHTML = p.off.length ? p.off.map(function (d) { return '<span class="chk-pill on">' + U.escapeHtml(U.shortDate(d)) + ' <button type="button" class="x" data-rm-off="' + d + '" aria-label="Remove">✕</button></span>'; }).join('') : '<span class="muted sm">None.</span>';
+      body.querySelector('[data-cls]').innerHTML = sc.closures.length ? sc.closures.map(function (c) { return '<span class="chk-pill on">' + U.escapeHtml(U.shortDate(c.date) + (c.reason ? ' · ' + c.reason : '')) + ' <button type="button" class="x" data-rm-cl="' + c.date + '" aria-label="Remove">✕</button></span>'; }).join('') : '<span class="muted sm">None.</span>';
+      Array.prototype.forEach.call(body.querySelectorAll('[data-rm-off]'), function (b) { b.addEventListener('click', function () { Store.removeDayOff(sel.value, b.getAttribute('data-rm-off')); paintLists(); }); });
+      Array.prototype.forEach.call(body.querySelectorAll('[data-rm-cl]'), function (b) { b.addEventListener('click', function () { Store.removeClosure(b.getAttribute('data-rm-cl')); paintLists(); }); });
+    }
+    sel.addEventListener('change', function () { paintHours(); paintLists(); });
+    body.querySelector('[data-save]').addEventListener('click', function () {
+      var hours = {}, bad = false;
+      DAYS.forEach(function (d) {
+        if (!body.querySelector('[data-on="' + d + '"]').checked) return;
+        var a = toMin(body.querySelector('[data-open="' + d + '"]').value), z = toMin(body.querySelector('[data-close="' + d + '"]').value);
+        if (a === null || z === null || a >= z) bad = true; else hours[d] = [a, z];
+      });
+      if (bad) { NS.app.toast('bad', 'Check the hours', 'Closing time must be after opening time.'); return; }
+      Store.setHours(sel.value, hours);
+      NS.app.toast('ok', 'Schedule saved', cur().name + ' — weekly hours updated.');
+    });
+    body.querySelector('[data-off-add]').addEventListener('click', function () {
+      var v = body.querySelector('[data-off-date]').value; if (!v) return;
+      Store.addDayOff(sel.value, v); body.querySelector('[data-off-date]').value = ''; paintLists();
+    });
+    body.querySelector('[data-cl-add]').addEventListener('click', function () {
+      var v = body.querySelector('[data-cl-date]').value; if (!v) return;
+      Store.addClosure(v, body.querySelector('[data-cl-why]').value.trim()); body.querySelector('[data-cl-date]').value = ''; body.querySelector('[data-cl-why]').value = ''; paintLists();
+    });
+    paintHours(); paintLists();
+    NS.app.openModal('Staff schedule', body, [{ label: 'Done', cls: 'btn-primary', onClick: NS.app.closeModal }]);
+  }
+
   /* ---------------- CSV ---------------- */
 
   function csvCell(v) {
@@ -302,18 +575,20 @@
     return '"' + s.replace(/"/g, '""') + '"';
   }
 
-  function exportCsv() {
-    var rows = filtered();
-    if (!rows.length) { NS.app.toast('bad', 'Nothing to export', 'No bookings match the filters.'); return; }
+  function exportCsv() { exportRows(filtered(), 'northlight-bookings-' + U.todayStr(NS.CLINIC_TZ) + '.csv'); }
+
+  function exportRows(rows, filename) {
+    if (!rows.length) { NS.app.toast('bad', 'Nothing to export', 'No bookings match.'); return; }
     var head = ['Reference', 'Date (clinic)', 'Start', 'End', 'Duration (min)', 'Service', 'Specialist',
-      'Customer', 'Email', 'Phone', 'Status', 'Price (PHP)', 'Reminder', 'Booked at', 'Revisions', 'Notes'];
+      'Customer', 'Email', 'Phone', 'Status', 'Price (PHP)', 'Payment', 'Source', 'Rating', 'Booked at', 'Revisions', 'Notes'];
     var lines = [head.map(csvCell).join(',')];
     rows.forEach(function (b) {
       var s = Store.serviceById(b.serviceId) || {}, p = Store.providerById(b.providerId) || {};
       lines.push([
         b.ref, b.date, U.minutesToTime(b.startMin), U.minutesToTime(b.startMin + b.minutes), b.minutes,
         s.name, p.name, b.customer.name, b.customer.email, b.customer.phone, b.status,
-        b.price, b.reminder || 'none', new Date(b.createdAt).toISOString(), b.revisions || 0, b.customer.notes || ''
+        b.price, b.payment ? (b.payment.method + ':' + b.payment.status) : '', b.source || 'online', b.review ? b.review.stars : '',
+        new Date(b.createdAt).toISOString(), b.revisions || 0, b.customer.notes || ''
       ].map(csvCell).join(','));
     });
     var csv = '\ufeff' + lines.join('\r\n');
@@ -321,13 +596,13 @@
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'northlight-bookings-' + U.todayStr(NS.CLINIC_TZ) + '.csv';
+    a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
     NS.app.toast('ok', 'CSV exported', rows.length + ' bookings written to file.');
   }
 
-  window.NSAdmin = { render: render, unlock: function () { unlocked = true; }, lock: lockDashboard, filters: filters };
+  window.NSAdmin = { render: render, unlock: function () { unlocked = true; }, filters: filters };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

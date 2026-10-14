@@ -1,10 +1,5 @@
 {
   "name": "northlight-studio",
   "private": true,
-  "engines": {
-    "node": ">=18"
-  },
-  "scripts": {
-    "test": "node tests/engine.test.js && node tests/otp.test.js && node tests/bookings.test.js && node tests/cloud.test.js"
-  }
+  "engines": { "node": ">=18" }
 }

@@ -22,6 +22,7 @@
     calY: 0,
     calM: 0,
     lookup: '',
+    mineTab: 'upcoming',
     notify: false
   };
   NS.state = state;
@@ -37,6 +38,7 @@
     state.tz = prefs.tzPick || CLINIC_TZ;   // Philippine time unless the customer picks another zone
     if (U.zoneList().indexOf(state.tz) < 0) state.tz = CLINIC_TZ;
     state.serviceId = prefs.serviceId || null;
+    if (state.serviceId && !NS.Store.serviceById(state.serviceId)) state.serviceId = null;
     state.providerId = prefs.providerId || null;
     state.notify = !!prefs.notify;
 
@@ -51,6 +53,7 @@
     wireTopbar();
     wireBookingForm();
     wireMine();
+    wireMineTabs();
 
     if (state.serviceId && !NS.Store.providersFor(state.serviceId).some(function (x) { return x.id === state.providerId; })) {
       state.providerId = null;
@@ -121,6 +124,7 @@
       var cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
       document.documentElement.setAttribute('data-theme', cur);
       Prefs.set({ theme: cur });
+      if (window.NSTheme) window.NSTheme.apply();
     });
     $('navToggle').addEventListener('click', function () {
       var open = $('tabs').classList.toggle('open');
@@ -229,7 +233,7 @@
     var wrap = $('serviceList');
     wrap.innerHTML = SERVICES.map(function (s) {
       var mins = s.minutes >= 60 ? (s.minutes / 60) + ' hr' : s.minutes + ' min';
-      return '<button type="button" class="service" role="radio" aria-checked="false" data-service="' + s.id + '">' +
+      return '<button type="button" class="service" role="checkbox" aria-checked="false" data-service="' + s.id + '">' +
         '<span class="service-top"><span class="service-emoji" aria-hidden="true">' + s.emoji + '</span>' + U.escapeHtml(s.name) + '</span>' +
         '<span class="service-blurb">' + U.escapeHtml(s.blurb) + '</span>' +
         '<span class="service-meta"><span class="pill">' + mins + '</span>' +
@@ -243,7 +247,15 @@
   }
 
   function pickService(id) {
-    state.serviceId = (state.serviceId === id) ? null : id;
+    var parts = Store.serviceParts(state.serviceId);
+    var has = parts.indexOf(id) >= 0;
+    var next = has ? parts.filter(function (x) { return x !== id; }) : parts.concat([id]);
+    var newId = next.length ? Store.bundleId(next) : null;
+    if (newId && !Store.providersFor(newId).length) {
+      toast('bad', 'Cannot combine these', 'No specialist does all of them in one visit, so only ' + Store.serviceById(id).name + ' is selected.');
+      newId = id;
+    }
+    state.serviceId = newId;
     if (state.serviceId) {
       var pool = Store.providersFor(state.serviceId);
       if (!pool.some(function (p) { return p.id === state.providerId; })) state.providerId = null;
@@ -262,7 +274,7 @@
       var role = p.role + ' · ' + p.services.length + ' services';
       return '<button type="button" class="provider" role="radio" aria-checked="false" data-provider="' + p.id + '">' +
         '<span class="avatar" style="background:' + p.color + '" aria-hidden="true">' + p.initials + '</span>' +
-        '<span><span class="provider-name">' + U.escapeHtml(p.name) + '</span><br><span class="provider-role">' + U.escapeHtml(role) + '</span></span>' +
+        '<span><span class="provider-name">' + U.escapeHtml(p.name) + '</span><br><span class="provider-role">' + U.escapeHtml(role) + '</span><br><span class="provider-rating" data-rating="' + p.id + '"></span></span>' +
         '</button>';
     }).join('');
     Array.prototype.forEach.call(wrap.querySelectorAll('[data-provider]'), function (b) {
@@ -273,7 +285,7 @@
   function pickProvider(id) {
     var p = Store.providerById(id);
     if (!p) return;
-    if (state.serviceId && p.services.indexOf(state.serviceId) < 0) {
+    if (state.serviceId && !Store.canDeliver(p, state.serviceId)) {
       toast('bad', 'Not offered', p.name + ' does not deliver that service.');
       return;
     }
@@ -284,12 +296,13 @@
   }
 
   function paintServices() {
+    var chosen = Store.serviceParts(state.serviceId);
     Array.prototype.forEach.call(document.querySelectorAll('[data-service]'), function (b) {
-      b.setAttribute('aria-checked', b.getAttribute('data-service') === state.serviceId ? 'true' : 'false');
+      b.setAttribute('aria-checked', chosen.indexOf(b.getAttribute('data-service')) >= 0 ? 'true' : 'false');
     });
     var s = Store.serviceById(state.serviceId);
     var chip = $('serviceChip');
-    chip.textContent = s ? s.name : 'nothing selected';
+    chip.textContent = s ? (chosen.length > 1 ? chosen.length + ' services · ' + s.minutes + ' min' : s.name) : 'nothing selected';
     chip.className = 'chip' + (s ? ' on' : '');
   }
 
@@ -297,7 +310,9 @@
     var wrap = $('providerList'), s = Store.serviceById(state.serviceId);
     Array.prototype.forEach.call(wrap.querySelectorAll('[data-provider]'), function (b) {
       var p = Store.providerById(b.getAttribute('data-provider'));
-      var offers = !state.serviceId || p.services.indexOf(state.serviceId) >= 0;
+      var offers = !state.serviceId || Store.canDeliver(p, state.serviceId);
+      var rt = Store.ratingFor(p.id), rEl = b.querySelector('[data-rating]');
+      if (rEl) rEl.textContent = rt.count ? '★ ' + rt.avg.toFixed(1) + ' (' + rt.count + ')' : '';
       b.classList.toggle('provider-off', !offers);
       b.setAttribute('aria-disabled', offers ? 'false' : 'true');
       b.setAttribute('aria-checked', b.getAttribute('data-provider') === state.providerId ? 'true' : 'false');
@@ -378,10 +393,12 @@
       hint.textContent = 'Times are shown in clinic local time' + (state.tz !== CLINIC_TZ ? ', with your local time underneath each slot.' : '.');
       $('slotDay').hidden = true;
       $('nextFreeBtn').hidden = true;
+      $('waitBtn').hidden = true;
       return;
     }
 
     var res = Store.slotsFor(p.id, s.id, state.date);
+    $('waitBtn').hidden = !(res.state === 'open' && res.free === 0);
     grid.classList.remove('is-empty');
     chip.textContent = res.state === 'open' ? (res.free + ' of ' + res.total + ' free') : res.state;
     chip.className = 'chip' + (res.state === 'open' && res.free > 0 ? ' ok' : (res.state === 'open' ? ' bad' : ''));
@@ -405,6 +422,7 @@
       grid.classList.add('is-empty');
       grid.innerHTML = '<p class="empty sm">' + U.escapeHtml(why) + '</p>';
       hint.textContent = 'Try another date, or jump to the nearest day with availability.';
+      $('waitBtn').hidden = true;
       showNextFree(true);
       return;
     }
@@ -479,7 +497,25 @@
       $('summaryWhen').textContent = '—';
     }
     $('summaryPrice').textContent = s ? (s.price ? U.money(s.price) : 'Free') : '—';
+    paintPayment(s);
     validateForm(true);
+  }
+
+  function payMethod() {
+    var r = document.querySelector('input[name="payMethod"]:checked');
+    return r ? r.value : 'salon';
+  }
+  function paintPayment(s) {
+    var box = $('payBox'); if (!box) return;
+    var paid = !!(s && s.price > 0);
+    box.hidden = !paid;
+    var g = paid && payMethod() === 'gcash';
+    $('gcashBox').hidden = !g;
+    if (paid) {
+      $('gcashAmt').textContent = U.money(s.price);
+      $('gcashNum').textContent = NS.GCASH.number;
+      $('gcashName').textContent = NS.GCASH.name;
+    }
   }
 
   function requiredSteps() {
@@ -496,6 +532,18 @@
       $(id).addEventListener('blur', function () { validateForm(false, id); });
     });
     $('bkConsent').addEventListener('change', function () { validateForm(true); });
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="payMethod"]'), function (r) {
+      r.addEventListener('change', function () { paintPayment(Store.serviceById(state.serviceId)); validateForm(true); });
+    });
+    $('bkPayRef').addEventListener('input', function () { validateForm(true); });
+    $('bkPayRef').addEventListener('blur', function () { validateForm(false, 'bkPayRef'); });
+    $('gcashCopy').addEventListener('click', function () {
+      var txt = NS.GCASH.number.replace(/\s+/g, '');
+      var done = function () { toast('ok', 'Copied', 'GCash number ' + NS.GCASH.number); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, function () { fallbackCopy(txt, done); });
+      else fallbackCopy(txt, done);
+    });
+    $('waitBtn').addEventListener('click', joinWaitlistHere);
     $('bkNotes').addEventListener('input', function () {
       $('notesCount').textContent = this.value.length + ' / 500';
     });
@@ -511,8 +559,9 @@
     $('resetBtn').addEventListener('click', function () {
       $('bookingForm').reset();
       $('notesCount').textContent = '0 / 500';
-      ['bkName', 'bkEmail', 'bkPhone', 'bkConsent'].forEach(function (id) { $(id).removeAttribute('aria-invalid'); });
-      ['errName', 'errEmail', 'errPhone', 'errConsent'].forEach(function (id) { $(id).textContent = ''; });
+      ['bkName', 'bkEmail', 'bkPhone', 'bkConsent', 'bkPayRef'].forEach(function (id) { $(id).removeAttribute('aria-invalid'); });
+      ['errName', 'errEmail', 'errPhone', 'errConsent', 'errPayRef'].forEach(function (id) { $(id).textContent = ''; });
+      paintPayment(Store.serviceById(state.serviceId));
       validateForm(true);
       toast('ok', 'Form cleared', 'Your selections are still intact.');
     });
@@ -542,6 +591,9 @@
     ok = fieldError('bkEmail', 'errEmail', !email ? 'An email is required for your confirmation.' : (!EMAIL_RE.test(email) ? 'That email address does not look right.' : ''), vis('bkEmail')) && ok;
     var digits = phone.replace(/[^\d]/g, '');
     ok = fieldError('bkPhone', 'errPhone', phone && (digits.length < 7 || digits.length > 15) ? 'Use 7–15 digits, or leave it blank.' : '', vis('bkPhone')) && ok;
+    var needRef = !$('payBox').hidden && payMethod() === 'gcash';
+    var ref = $('bkPayRef').value.trim();
+    ok = fieldError('bkPayRef', 'errPayRef', needRef && !/^[A-Za-z0-9]{6,20}$/.test(ref) ? 'Enter the GCash reference number (6–20 letters or digits).' : '', vis('bkPayRef')) && ok;
     ok = fieldError('bkConsent', 'errConsent', consent ? '' : 'Please accept the cancellation policy.', vis('bkConsent')) && ok;
 
     var steps = stepsDone();
@@ -583,24 +635,22 @@
     btn.disabled = true;
     btn.textContent = 'Reserving…';
 
-    // re-verify at the moment of truth: with the shared database on, the server checks the
-    // slot again and the database itself refuses a double booking
-    var pending = {
-      serviceId: state.serviceId,
-      providerId: state.providerId,
-      date: state.date,
-      startMin: state.startMin,
-      name: $('bkName').value,
-      email: (NS.auth && NS.auth.isSignedIn && NS.auth.isSignedIn() && NS.auth.session().email) || $('bkEmail').value,
-      phone: $('bkPhone').value,
-      notes: $('bkNotes').value,
-      reminder: '1h',
-      tz: state.tz
-    };
-    var started = Date.now();
-    Store.bookAsync(pending).then(function (res) {
-      return new Promise(function (resolve) { setTimeout(function () { resolve(res); }, Math.max(0, 320 - (Date.now() - started))); });
-    }).then(function (res) {
+    // re-verify at the moment of truth (another tab / customer may have taken it)
+    setTimeout(function () {
+      var res = Store.book({
+        serviceId: state.serviceId,
+        providerId: state.providerId,
+        date: state.date,
+        startMin: state.startMin,
+        name: $('bkName').value,
+        email: (NS.auth && NS.auth.isSignedIn && NS.auth.isSignedIn() && NS.auth.session().email) || $('bkEmail').value,
+        phone: $('bkPhone').value,
+        notes: $('bkNotes').value,
+        reminder: '1h',
+        payMethod: !$('payBox').hidden ? payMethod() : 'salon',
+        payRef: $('bkPayRef').value,
+        tz: state.tz
+      });
       btn.textContent = 'Confirm booking';
       btn.disabled = false;
 
@@ -609,12 +659,6 @@
           toast('bad', 'Slot just taken', 'Someone booked that time seconds ago. Pick another slot.');
           state.startMin = null;
           renderSlots(); renderSummary();
-        } else if (res.error === 'network' || res.error === 'db-error') {
-          toast('bad', res.error === 'network' ? 'No connection' : 'Server busy', 'Your booking was not saved. Please try again in a moment.');
-        } else if (res.error === 'too-many-bookings') {
-          toast('bad', 'Too many open bookings', 'This email already has several upcoming bookings.');
-        } else if (res.error === 'rate-limited') {
-          toast('bad', 'Too many attempts', 'Please wait a few minutes and try again.');
         } else {
           toast('bad', 'Could not book', 'Please review your selection.');
         }
@@ -628,12 +672,19 @@
       });
       openConfirmation(res.booking);
       renderAll();
-    });
+    }, 320);
   }
 
   /* ============================================================
      confirmation
      ============================================================ */
+  function payLabel(b) {
+    var p = b.payment || {};
+    if (p.status === 'paid') return 'Paid' + (p.method === 'gcash' ? ' · GCash' : '');
+    if (p.status === 'awaiting') return 'GCash — awaiting confirmation' + (p.ref ? ' (ref ' + p.ref + ')' : '');
+    return 'Pay at the salon';
+  }
+
   function ticketHtml(b) {
     var s = Store.serviceById(b.serviceId), p = Store.providerById(b.providerId);
     var local = U.display(b.date, b.startMin, state.tz);
@@ -645,13 +696,17 @@
       '<div class="ticket-row"><span>Time (clinic)</span><strong>' + U.minutesToTime(b.startMin) + '–' + U.minutesToTime(b.startMin + b.minutes) + '</strong></div>' +
       (state.tz !== CLINIC_TZ ? '<div class="ticket-row"><span>Time (' + U.escapeHtml(state.tz) + ')</span><strong>' + local.time + '</strong></div>' : '') +
       '<div class="ticket-row"><span>Price</span><strong>' + (b.price ? U.money(b.price) : 'Free') + '</strong></div>' +
+      (b.payment && b.payment.method !== 'free' ? '<div class="ticket-row"><span>Payment</span><strong>' + U.escapeHtml(payLabel(b)) + '</strong></div>' : '') +
       '<div class="ticket-row"><span>Email</span><strong>' + U.escapeHtml(b.customer.email) + '</strong></div>' +
       '</div>';
   }
 
   function openConfirmation(b) {
-    var body = '<p>Your slot is locked in the studio calendar. A confirmation has been queued for <strong>' + U.escapeHtml(b.customer.email) + '</strong>.</p>' + ticketHtml(b);
-    openModal('Booking confirmed', body, [
+    var pending = b.status === 'pending';
+    var body = (pending
+      ? '<p>Your slot is <strong>held</strong>. We will confirm it as soon as we verify your GCash payment (reference <strong>' + U.escapeHtml((b.payment && b.payment.ref) || '') + '</strong>). Track it under My bookings.</p>'
+      : '<p>Your slot is locked in the studio calendar. Keep this reference for <strong>' + U.escapeHtml(b.customer.email) + '</strong>.</p>') + ticketHtml(b);
+    openModal(pending ? 'Booking reserved' : 'Booking confirmed', body, [
       { label: 'Download .ics', cls: 'btn-primary', onClick: function () { downloadIcs(b); } },
       { label: 'Add to Google Calendar', cls: 'btn-ghost', onClick: function () { window.open(NS.googleCalendarUrl(b), '_blank', 'noopener'); } },
       { label: 'Copy booking link', cls: 'btn-ghost', onClick: function () { copyLink(b); } },
@@ -841,41 +896,74 @@
     renderMine();
   }
 
+  function sessionEmail() {
+    return (NS.auth && NS.auth.isSignedIn && NS.auth.isSignedIn() && NS.auth.session().email) || Prefs.get('email', '') || '';
+  }
+
+  function isPastBooking(b, now) {
+    return b.status === 'cancelled' || b.status === 'completed' || U.instantOf(b.date, b.startMin).getTime() < now;
+  }
+
+  function wireMineTabs() {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-mt]'), function (t) {
+      t.addEventListener('click', function () { state.mineTab = t.getAttribute('data-mt'); renderMine(); });
+    });
+  }
+
   function renderMine() {
     var wrap = $('mineList'), chip = $('mineChip');
-    if (!state.lookup) { state.lookup = Prefs.get('email', '') || ''; $('lookupInput').value = state.lookup; }
+    if (!state.lookup) { state.lookup = sessionEmail(); $('lookupInput').value = state.lookup; }
+    renderWaitNotes();
     if (!state.lookup) {
       wrap.innerHTML = '<p class="empty sm">Nothing looked up yet.</p>';
       chip.textContent = 'lookup'; chip.className = 'chip';
+      $('mineTabs').hidden = true;
       return;
     }
-    var rows = Store.mine(state.lookup);
-    chip.textContent = rows.length + ' found';
-    chip.className = 'chip' + (rows.length ? ' on' : '');
+    var all = Store.mine(state.lookup), now = Date.now();
+    var up = all.filter(function (b) { return !isPastBooking(b, now); });
+    var past = all.filter(function (b) { return isPastBooking(b, now); });
+    chip.textContent = all.length + ' found';
+    chip.className = 'chip' + (all.length ? ' on' : '');
+    $('mineTabs').hidden = !all.length;
+    $('mtUp').textContent = up.length; $('mtPast').textContent = past.length; $('mtAll').textContent = all.length;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-mt]'), function (t) {
+      t.setAttribute('aria-selected', t.getAttribute('data-mt') === state.mineTab ? 'true' : 'false');
+    });
+    if (!all.length) {
+      wrap.innerHTML = '<p class="empty sm">No bookings matched <strong>' + U.escapeHtml(state.lookup) + '</strong>. Check the email or reference.</p>';
+      return;
+    }
+    var rows = state.mineTab === 'past' ? past.slice().reverse() : state.mineTab === 'all' ? all : up;
     if (!rows.length) {
-      wrap.innerHTML = '<p class="empty sm">No bookings matched <strong>' + U.escapeHtml(state.lookup) + '</strong>. Check the reference (BK-XXXXXX), or sign in with Google to see all your bookings.</p>';
+      wrap.innerHTML = '<p class="empty sm">' + (state.mineTab === 'upcoming' ? 'No upcoming bookings. Check the Past tab, or book a new visit.' : 'Nothing here yet.') + '</p>';
       return;
     }
-    var now = Date.now();
     wrap.innerHTML = rows.map(function (b) {
       var s = Store.serviceById(b.serviceId), p = Store.providerById(b.providerId);
-      var past = U.instantOf(b.date, b.startMin).getTime() < now;
-      var canCancel = !past && b.status === 'confirmed';
+      var isPast = isPastBooking(b, now);
+      var live = b.status === 'confirmed' || b.status === 'pending';
+      var canCancel = !isPast && live;
       var hoursOut = (U.instantOf(b.date, b.startMin).getTime() - now) / 3600000;
       var feeNote = canCancel ? (hoursOut >= 24 ? 'free to cancel' : 'late cancellation') : '';
+      var canReview = !b.review && (b.status === 'completed' || (b.status === 'confirmed' && isPast));
       return '<article class="booking-card" data-id="' + b.id + '">' +
         '<div class="booking-top"><span class="ref">' + U.escapeHtml(b.ref) + '</span>' +
-        '<span class="badge ' + b.status + '">' + b.status + '</span>' +
+        '<span class="badge ' + b.status + '">' + (b.status === 'pending' ? 'awaiting payment' : b.status) + '</span>' +
         (b.revisions ? '<span class="pill">moved ×' + b.revisions + '</span>' : '') +
-        (!past && b.status === 'confirmed' ? '<span class="pill">' + U.escapeHtml(feeNote) + '</span>' : '') + '</div>' +
+        (canCancel ? '<span class="pill">' + U.escapeHtml(feeNote) + '</span>' : '') + '</div>' +
         '<p class="booking-when">' + U.escapeHtml(U.longDate(b.date)) + ' · ' + U.minutesToTime(b.startMin) + '–' + U.minutesToTime(b.startMin + b.minutes) +
         '<span class="muted"> (' + tzLabel(CLINIC_TZ) + ')</span></p>' +
         '<p class="booking-sub">' + U.escapeHtml(s.name) + ' with ' + U.escapeHtml(p.name) + ' · ' + (b.price ? U.money(b.price) : 'Free') +
         (state.tz !== CLINIC_TZ ? ' · ' + U.display(b.date, b.startMin, state.tz).time + ' your time' : '') + '</p>' +
+        (b.payment && b.payment.method !== 'free' ? '<p class="booking-sub muted">' + U.escapeHtml(payLabel(b)) + '</p>' : '') +
+        (b.review ? '<p class="booking-sub"><span class="stars">' + '★'.repeat(b.review.stars) + '<span class="muted">' + '★'.repeat(5 - b.review.stars) + '</span></span>' + (b.review.text ? ' <span class="muted">“' + U.escapeHtml(b.review.text) + '”</span>' : '') + '</p>' : '') +
         '<div class="booking-actions">' +
-        (b.status === 'confirmed' ? '<button type="button" class="btn btn-ghost btn-sm" data-act="resched">Reschedule</button>' : '') +
+        (live && !isPast ? '<button type="button" class="btn btn-ghost btn-sm" data-act="resched">Reschedule</button>' : '') +
         (canCancel ? '<button type="button" class="btn btn-ghost btn-sm" data-act="cancel">Cancel</button>' : '') +
         (b.status === 'cancelled' ? '<button type="button" class="btn btn-ghost btn-sm" data-act="reinstate">Reinstate</button>' : '') +
+        (canReview ? '<button type="button" class="btn btn-primary btn-sm" data-act="review">★ Rate visit</button>' : '') +
+        (isPast ? '<button type="button" class="btn btn-ghost btn-sm" data-act="again">Book again</button>' : '') +
         '<button type="button" class="btn btn-ghost btn-sm" data-act="ics">.ics</button>' +
         '<button type="button" class="btn btn-ghost btn-sm" data-act="detail">Details</button>' +
         '</div></article>';
@@ -890,11 +978,103 @@
         else if (act === 'cancel') openCancel(b);
         else if (act === 'ics') downloadIcs(b);
         else if (act === 'detail') openDetail(b);
+        else if (act === 'review') openReview(b);
+        else if (act === 'again') bookAgain(b);
         else if (act === 'reinstate') {
           var res = Store.setStatus(id, 'confirmed', 'Reinstated by customer');
           toast(res.ok ? 'ok' : 'bad', res.ok ? 'Booking reinstated' : 'Slot no longer free',
             res.ok ? b.ref + ' is confirmed again.' : 'Somebody else took that slot — please rebook.');
         }
+      });
+    });
+  }
+
+  /* "Book again": same service + specialist, pick a new date. */
+  function bookAgain(b) {
+    state.serviceId = b.serviceId;
+    state.providerId = Store.canDeliver(Store.providerById(b.providerId), b.serviceId) ? b.providerId : null;
+    state.date = null; state.startMin = null;
+    Prefs.set({ serviceId: state.serviceId, providerId: state.providerId });
+    setView('book', { force: !!sessionEmail() });
+    renderAll();
+    toast('ok', 'Pick a new date', Store.serviceById(b.serviceId).name + (state.providerId ? ' with ' + Store.providerById(b.providerId).name : '') + ' is selected.');
+  }
+
+  /* ---------------- reviews ---------------- */
+  function openReview(b) {
+    var rating = 0;
+    var body = document.createElement('div');
+    body.innerHTML = '<p class="muted sm">How was <strong>' + U.escapeHtml(Store.serviceById(b.serviceId).name) + '</strong> with ' + U.escapeHtml(Store.providerById(b.providerId).name) + '?</p>' +
+      '<div class="star-row" role="radiogroup" aria-label="Rating">' +
+      [1, 2, 3, 4, 5].map(function (n) { return '<button type="button" class="star-btn" role="radio" aria-checked="false" data-star="' + n + '" aria-label="' + n + ' star' + (n > 1 ? 's' : '') + '">★</button>'; }).join('') + '</div>' +
+      '<div class="field"><label for="rvText">Comment <span class="opt">optional</span></label><textarea class="input" id="rvText" rows="3" maxlength="400" placeholder="What did you like?"></textarea></div>' +
+      '<p class="err" id="rvErr" role="alert"></p>';
+    function paintStars() {
+      Array.prototype.forEach.call(body.querySelectorAll('[data-star]'), function (x) {
+        var n = +x.getAttribute('data-star');
+        x.classList.toggle('on', n <= rating);
+        x.setAttribute('aria-checked', n === rating ? 'true' : 'false');
+      });
+    }
+    Array.prototype.forEach.call(body.querySelectorAll('[data-star]'), function (x) {
+      x.addEventListener('click', function () { rating = +x.getAttribute('data-star'); paintStars(); });
+    });
+    openModal('Rate your visit', body, [
+      { label: 'Submit review', cls: 'btn-primary', onClick: function () {
+          if (!rating) { body.querySelector('#rvErr').textContent = 'Tap a star rating first.'; return; }
+          var r = Store.addReview(b.id, rating, body.querySelector('#rvText').value);
+          if (!r.ok) { body.querySelector('#rvErr').textContent = 'Could not save your review.'; return; }
+          closeModal(); toast('ok', 'Thank you!', 'Your review was saved.'); renderMine();
+        } },
+      { label: 'Not now', cls: 'btn-ghost', onClick: closeModal }
+    ]);
+  }
+
+  /* ---------------- waitlist ---------------- */
+  function joinWaitlistHere() {
+    var email = sessionEmail();
+    if (!email) { if (NS.auth && NS.auth.showScreen) NS.auth.showScreen('auth', 'signin'); return; }
+    if (!state.serviceId || !state.date) return;
+    var nm = (NS.auth && NS.auth.isSignedIn() && NS.auth.session().name) || $('bkName').value || '';
+    var r = Store.joinWaitlist({ serviceId: state.serviceId, providerId: state.providerId, date: state.date, email: email, name: nm });
+    toast('ok', r.existing ? 'Already on the list' : 'You are on the waitlist',
+      U.longDate(state.date) + ' — we will flag it under “Next up” the moment a slot opens.');
+    renderWaitNotes();
+  }
+
+  function renderWaitNotes() {
+    var email = sessionEmail();
+    var entries = email ? Store.waitlistFor(email) : [];
+    var html = entries.map(function (w) {
+      var sv = Store.serviceById(w.serviceId); if (!sv) return '';
+      var notified = w.status === 'notified';
+      if (notified && !fired['w' + w.id]) {
+        fired['w' + w.id] = 1;
+        toast('ok', 'A slot opened up!', sv.name + ' on ' + U.shortDate(w.date) + ' — open “Next up” to book it.');
+      }
+      return '<div class="wait-card' + (notified ? ' hot' : '') + '" data-wid="' + w.id + '">' +
+        '<div><strong>' + (notified ? '🔔 A slot opened up' : '⏳ On the waitlist') + '</strong><br>' +
+        '<span class="muted sm">' + U.escapeHtml(sv.name) + ' · ' + U.escapeHtml(U.shortDate(w.date)) + '</span></div>' +
+        '<div class="booking-actions">' +
+        (notified ? '<button type="button" class="btn btn-primary btn-sm" data-w="book">Book it</button>' : '') +
+        '<button type="button" class="btn btn-ghost btn-sm" data-w="leave">' + (notified ? 'Dismiss' : 'Leave') + '</button></div></div>';
+    }).join('');
+    ['waitNotes', 'mineWait'].forEach(function (id) {
+      var box = $(id); if (!box) return;
+      box.innerHTML = html;
+      Array.prototype.forEach.call(box.querySelectorAll('[data-w]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var wid = btn.closest('[data-wid]').getAttribute('data-wid');
+          var w = Store.waitlistFor(email).filter(function (x) { return x.id === wid; })[0];
+          if (btn.getAttribute('data-w') === 'leave') { Store.leaveWaitlist(wid); return; }
+          if (!w) return;
+          state.serviceId = w.serviceId; state.providerId = w.providerId || null; state.startMin = null;
+          var pr = U.parseDateStr(w.date); state.calY = pr.y; state.calM = pr.m;
+          Prefs.set({ serviceId: state.serviceId, providerId: state.providerId });
+          setView('book', { force: !!email });
+          Store.leaveWaitlist(wid);
+          pickDate(w.date); renderAll();
+        });
       });
     });
   }
@@ -1061,17 +1241,15 @@
     var m = /[?&]ref=([^&]+)/.exec(location.search);
     if (!m) return;
     var ref = decodeURIComponent(m[1]);
+    var b = Store.byRef(ref);
     setView('mine');
     openMine(ref);
-    Store.findRef(ref).then(function (b) {
-      if (b) {
-        openMine(ref);
-        toast('ok', 'Booking found', b.ref + ' · ' + U.longDate(b.date) + ' ' + U.minutesToTime(b.startMin));
-        openDetail(b);
-      } else {
-        toast('bad', 'Reference not found', 'No booking matches ' + ref + '.');
-      }
-    });
+    if (b) {
+      toast('ok', 'Booking found', b.ref + ' · ' + U.longDate(b.date) + ' ' + U.minutesToTime(b.startMin));
+      openDetail(b);
+    } else {
+      toast('bad', 'Reference not found', 'No booking matches ' + ref + ' on this device.');
+    }
   }
 
   /* ============================================================
@@ -1084,6 +1262,7 @@
     renderSlots();
     renderSummary();
     renderNext();
+    renderWaitNotes();
     if (state.view === 'mine') renderMine();
   }
 
